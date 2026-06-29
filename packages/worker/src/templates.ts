@@ -25,6 +25,7 @@ export interface TaskContext {
   title: string;
   body: string;
   comments?: Array<{ author: string; location?: string; body: string }>;
+  mergeConflicts?: string[];
 }
 
 const FILE_BY_MODE: Record<JobMode, string> = {

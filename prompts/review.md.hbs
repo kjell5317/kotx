@@ -21,6 +21,16 @@ PR branch (already checked out at /workspace): {{branchName}}
 _(no comments yet)_
 {{/if}}
 
+{{#if mergeConflicts.length}}
+## ⚠️ Resolve merge conflicts first
+The latest default branch was merged into this PR's branch and these files
+conflict. Resolve them (remove the conflict markers, keep the correct combined
+result) as part of your work — leave no `<<<<<<<`/`=======`/`>>>>>>>` markers:
+{{#each mergeConflicts}}
+- {{this}}
+{{/each}}
+{{/if}}
+
 ## Working agreement
 
 - `/workspace` is the PR's own branch. Make your changes directly there — they

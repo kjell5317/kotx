@@ -11,9 +11,14 @@ FROM node:20-bookworm-slim
 # anything else a project needs at runtime (see the prompts).
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-       git ca-certificates bash curl \
+       git ca-certificates bash curl make build-essential \
        python3 python3-pip python3-venv python-is-python3 \
   && rm -rf /var/lib/apt/lists/*
+
+# The runner runs with --cap-drop ALL, so apt can't drop to the `_apt` user
+# (needs CAP_SETUID) — make apt run as root so RUNTIME `apt-get install` still
+# works for projects that need extra system packages.
+RUN printf 'APT::Sandbox::User "root";\n' > /etc/apt/apt.conf.d/99-kotx-no-sandbox
 
 # uv (fast Python package/env manager used by many projects). Copy the static
 # binaries from the official image; pin the tag for reproducible builds.

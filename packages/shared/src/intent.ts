@@ -7,6 +7,20 @@ export const LABELS = {
 } as const;
 
 const COMMAND_RE = /^\/agent\s+(run|review|stop|status)\b/;
+const COMMAND_LINE_RE = /^\/agent\s+(run|review|stop|status)\b/i;
+
+/**
+ * Remove any `/agent …` command lines from a comment body so operational
+ * commands don't leak into the discussion shown to Codex. Returns the trimmed
+ * remainder (empty string if the comment was only a command).
+ */
+export function stripAgentCommands(body: string): string {
+  return body
+    .split("\n")
+    .filter((line) => !COMMAND_LINE_RE.test(line.trim()))
+    .join("\n")
+    .trim();
+}
 
 /** Parse the first non-empty line of a comment body for an /agent command. */
 export function parseCommand(body: string): AgentCommand | null {

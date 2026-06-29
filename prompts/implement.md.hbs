@@ -18,6 +18,16 @@ Branch (already checked out at /workspace): {{branchName}}
 {{/each}}
 {{/if}}
 
+{{#if mergeConflicts.length}}
+## ⚠️ Resolve merge conflicts first
+The latest default branch was merged into this branch and these files conflict.
+Resolve them (remove the conflict markers, keep the correct combined result) as
+part of your work — leave no `<<<<<<<`/`=======`/`>>>>>>>` markers behind:
+{{#each mergeConflicts}}
+- {{this}}
+{{/each}}
+{{/if}}
+
 ## Working agreement
 
 - Work in `/workspace`; it is the branch above. Make all your changes there.

@@ -1,4 +1,9 @@
-import { postIssueComment, splitRepo, type SubjectType } from "@kotx/shared";
+import {
+  postIssueComment,
+  splitRepo,
+  stripAgentCommands,
+  type SubjectType,
+} from "@kotx/shared";
 import type { Octokit } from "@octokit/rest";
 
 export interface DiscussionItem {
@@ -38,11 +43,12 @@ async function fetchDiscussion(
     per_page: 100,
   });
   for (const c of conv.data) {
-    if (c.body?.trim())
+    const body = stripAgentCommands(c.body ?? "");
+    if (body)
       items.push({
         author: c.user?.login ?? "?",
         when: c.created_at,
-        body: c.body,
+        body,
       });
   }
 
@@ -54,12 +60,12 @@ async function fetchDiscussion(
       per_page: 100,
     });
     for (const r of reviews.data) {
-      const body = r.body ?? "";
+      const body = stripAgentCommands(r.body ?? "");
       const state = r.state ?? "";
       const meaningful = ["CHANGES_REQUESTED", "APPROVED", "DISMISSED"].includes(
         state,
       );
-      if (body.trim() || meaningful)
+      if (body || meaningful)
         items.push({
           author: r.user?.login ?? "?",
           when: r.submitted_at ?? "",
@@ -75,13 +81,14 @@ async function fetchDiscussion(
       per_page: 100,
     });
     for (const c of inline.data) {
-      if (!c.body?.trim()) continue;
+      const body = stripAgentCommands(c.body ?? "");
+      if (!body) continue;
       const line = c.line ?? c.original_line ?? "?";
       items.push({
         author: c.user?.login ?? "?",
         when: c.created_at,
         location: `${c.path}:${line}`,
-        body: c.body,
+        body,
       });
     }
   }

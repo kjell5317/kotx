@@ -28,6 +28,7 @@ import {
   commitAll,
   ensureMirrorFetched,
   issueBranchName,
+  mergeDefaultBranch,
   mirrorPath,
   pushBranch,
   removeWorktree,
@@ -148,7 +149,9 @@ export async function processJob(job: TaskJob): Promise<void> {
 
   const worktreePath = run.worktree_path;
   const runOutputDir = join(env.agentDataDir, "runs", String(run.id));
-  const isReview = task.kind === "review";
+  // Behavior is decided by the SUBJECT, not how it was triggered: a PR always
+  // uses its own head branch (never invent a branch), an issue gets a fresh one.
+  const isPr = task.subject_type === "pull_request";
   const name = containerName(run.id);
   let started = false;
 
@@ -182,7 +185,7 @@ export async function processJob(job: TaskJob): Promise<void> {
     //  - PR     → the PR's own head branch (so pushes update the PR)
     let branch: string;
     let startRef: string;
-    if (isReview) {
+    if (isPr) {
       if (!subject.headRef) throw new Error("PR has no head ref");
       if (
         subject.headRepoFullName &&
@@ -220,7 +223,16 @@ export async function processJob(job: TaskJob): Promise<void> {
       startRef,
     );
 
-    const taskMd = renderTaskMd(job.mode, {
+    // Merge the latest default branch in before building so the agent works on
+    // top of main. Conflicts are left in place for the agent to resolve.
+    const merge = await mergeDefaultBranch(worktreePath, repo.default_branch);
+    if (merge.conflicted)
+      logger.info(
+        { taskId: task.id, files: merge.files },
+        "merge conflicts left for the agent to resolve",
+      );
+
+    const taskMd = renderTaskMd(isPr ? "review" : "implement", {
       repoFullName: task.repo_full_name,
       subjectType: task.subject_type,
       subjectNumber: task.subject_number,
@@ -228,6 +240,7 @@ export async function processJob(job: TaskJob): Promise<void> {
       title: subject.title,
       body: subject.body,
       comments: subject.comments,
+      mergeConflicts: merge.conflicted ? merge.files : undefined,
     });
     await writeFile(join(runOutputDir, "TASK.md"), taskMd, "utf8");
 
@@ -265,7 +278,8 @@ export async function processJob(job: TaskJob): Promise<void> {
       );
       await deleteArtifacts(worktreePath);
       const committed = await commitAll(worktreePath, msgFile);
-      if (committed) {
+      // push if the agent committed changes OR the pre-merge advanced the branch
+      if (committed || merge.advanced) {
         await pushBranch(task.repo_full_name, branch, gitToken(), {
           forceWithLease: task.subject_type === "issue",
         });
@@ -273,7 +287,7 @@ export async function processJob(job: TaskJob): Promise<void> {
 
       const summary = artifacts.resultMd ?? "Done.";
       const body =
-        !isReview && committed
+        !isPr && committed
           ? `${summary}\n\nChanges pushed to \`${branch}\`.`
           : summary;
       await postSummary(octokit, task.repo_full_name, task.subject_number, body);

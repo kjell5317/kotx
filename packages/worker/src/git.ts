@@ -115,6 +115,58 @@ async function resolveRef(mirror: string, ref: string): Promise<string | null> {
 }
 
 /**
+ * Merge the (already-fetched) default branch into the current worktree branch
+ * before the agent starts, so it builds on top of the latest main.
+ *
+ * - clean merge → `advanced` reflects whether the branch actually moved
+ *   ("Already up to date" for a fresh issue branch → advanced=false).
+ * - conflicts → the conflicted merge is LEFT IN PROGRESS (not aborted) so the
+ *   agent can resolve it in-place; the host finalizes it at commit time. Returns
+ *   the conflicted file list so we can append resolution instructions to TASK.md.
+ */
+export async function mergeDefaultBranch(
+  worktreePath: string,
+  defaultBranch: string,
+): Promise<{ conflicted: boolean; files: string[]; advanced: boolean }> {
+  const env = loadEnv();
+  const head = async () =>
+    (await run("git", ["-C", worktreePath, "rev-parse", "HEAD"])).stdout.trim();
+  const before = await head();
+  try {
+    await run("git", [
+      "-C",
+      worktreePath,
+      "-c",
+      `user.name=${env.github.committerName}`,
+      "-c",
+      `user.email=${env.github.committerEmail}`,
+      "merge",
+      "--no-edit",
+      `refs/remotes/origin/${defaultBranch}`,
+    ]);
+    return { conflicted: false, files: [], advanced: (await head()) !== before };
+  } catch {
+    const { stdout } = await run("git", [
+      "-C",
+      worktreePath,
+      "diff",
+      "--name-only",
+      "--diff-filter=U",
+    ]).catch(() => ({ stdout: "", stderr: "" }));
+    const files = stdout
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (files.length === 0) {
+      // merge failed for a non-conflict reason — don't leave a broken state
+      await run("git", ["-C", worktreePath, "merge", "--abort"]).catch(() => {});
+      return { conflicted: false, files: [], advanced: false };
+    }
+    return { conflicted: true, files, advanced: false };
+  }
+}
+
+/**
  * Push the branch to GitHub over an ephemeral authed HTTPS remote.
  *
  * For worker-owned issue branches, `forceWithLease` lets a rerun replace the
