@@ -43,6 +43,8 @@ export async function runCodexContainer(opts: {
     "codex",
     "exec",
     "--json",
+    // don't persist session files — CODEX_HOME is mounted read-only
+    "--ephemeral",
     `--sandbox ${codex.sandbox}`,
     // approval policy is a config value in exec mode (no --ask-for-approval flag)
     `-c approval_policy=${codex.approval_policy}`,

@@ -15,9 +15,13 @@ ARG CODEX_VERSION=latest
 RUN npm install -g @openai/codex@${CODEX_VERSION} \
   && codex --version
 
-# Unprivileged user; CODEX_HOME mount target lives under its home.
-RUN useradd -m -u 1001 codex
-USER codex
+# NOTE: runs as root so it can write the worktree + /run-output bind mounts
+# (created by the root worker) and read the root-owned auth. Acceptable here:
+# the container drops all caps, no-new-privileges, no docker socket, minimal
+# binds, and is destroyed after each task. To run unprivileged instead, have the
+# worker chown the worktree/run dirs to this uid before launch, then re-enable:
+#   RUN useradd -m -u 1001 codex
+#   USER codex
 ENV CODEX_HOME=/home/codex/.codex
 WORKDIR /workspace
 
