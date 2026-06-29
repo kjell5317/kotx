@@ -25,7 +25,7 @@ function names(arr: any[] | undefined, key: string): string[] {
   return Array.isArray(arr) ? arr.map((x) => x?.[key]).filter(Boolean) : [];
 }
 
-function subjectFromIssue(issue: any): NormalizedSubject {
+export function subjectFromIssue(issue: any): NormalizedSubject {
   // issue_comment on a PR still arrives under `issue`, flagged by `pull_request`.
   const isPr = !!issue.pull_request;
   return {

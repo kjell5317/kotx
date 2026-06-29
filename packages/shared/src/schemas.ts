@@ -38,6 +38,10 @@ export const repoConfigSchema = z.object({
   enabled: z.boolean(),
   default_branch: z.string().default("main"),
   assignee_login: z.string(),
+  // true = poll this repo (no webhook rights); false = rely on webhooks.
+  // In poll mode the trigger label is removed once a task is enqueued, so the
+  // level-triggered poll doesn't re-fire — re-add the label to re-run.
+  poll: z.boolean().default(false),
   allow_infra_changes: z.boolean().default(false),
   allow_secret_access: z.boolean().default(false),
   overrides: z
@@ -51,12 +55,3 @@ export type RepoConfig = z.infer<typeof repoConfigSchema>;
 export const reposFileSchema = z.object({
   repos: z.array(repoConfigSchema),
 });
-
-// ── Codex output: HITL_REQUEST.json (SPEC §11.1) ────────────────────────────
-export const hitlRequestSchema = z.object({
-  reason: z.string().min(1),
-  proposed_action: z.string().min(1),
-  risk: z.enum(["low", "medium", "high"]),
-  alternatives: z.array(z.string()).default([]),
-});
-export type HitlRequestPayload = z.infer<typeof hitlRequestSchema>;

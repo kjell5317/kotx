@@ -4,8 +4,5 @@ repos:
   - full_name: "TUM-Social-AI/AflaConnect"
     enabled: true
     default_branch: "main"
-    # The single authorized commander. Tasks are eligible only when the issue/PR
-    # is assigned to this login, and /agent commands are honored only from it.
     assignee_login: "kjell5317"
-    allow_infra_changes: false
-    allow_secret_access: false
+    poll: false

@@ -24,14 +24,11 @@ export interface TaskContext {
   branchName: string;
   title: string;
   body: string;
-  proposedAction?: string;
-  approvalNote?: string;
 }
 
 const FILE_BY_MODE: Record<JobMode, string> = {
   implement: "implement.md.hbs",
   review: "review.md.hbs",
-  resume: "resume.md.hbs",
 };
 
 export function renderTaskMd(mode: JobMode, ctx: TaskContext): string {

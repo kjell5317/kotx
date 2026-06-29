@@ -10,7 +10,6 @@ import {
   type TaskJob,
 } from "@kotx/shared";
 import { processJob } from "./orchestrator.js";
-import { startApprovalSweeper } from "./timers.js";
 
 loadEnv();
 const defaults = loadDefaults();
@@ -32,11 +31,8 @@ worker.on("failed", (job, err) => {
 });
 worker.on("ready", () => logger.info("worker ready"));
 
-const sweeper = startApprovalSweeper();
-
 async function shutdown(signal: string): Promise<void> {
   logger.info({ signal }, "shutting down worker");
-  clearInterval(sweeper);
   await worker.close();
   await closePool();
   await getRedis().quit();

@@ -2,6 +2,7 @@ import { loadDefaults, loadEnv, loadRepos, logger, recordDelivery } from "@kotx/
 import Fastify from "fastify";
 import { normalize } from "./extract.js";
 import { ingest } from "./pipeline.js";
+import { startPoller } from "./poller.js";
 import { verifySignature } from "./verify.js";
 
 const env = loadEnv();
@@ -61,7 +62,17 @@ app.post("/github/webhook", async (req, reply) => {
 
 app
   .listen({ port: env.port, host: env.host })
-  .then(() => logger.info({ port: env.port }, "app listening"))
+  .then(() => {
+    logger.info({ port: env.port }, "app listening");
+    const poller = startPoller(); // null if no repos use poll mode
+    const shutdown = async () => {
+      if (poller) clearInterval(poller);
+      await app.close();
+      process.exit(0);
+    };
+    process.on("SIGTERM", () => void shutdown());
+    process.on("SIGINT", () => void shutdown());
+  })
   .catch((err) => {
     logger.error({ err }, "failed to start app");
     process.exit(1);

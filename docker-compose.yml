@@ -12,25 +12,39 @@ services:
     depends_on:
       - app
 
+  # one-shot: applies pending DB migrations, then exits. app/worker wait for it.
+  migrate:
+    image: ${KOTX_IMAGE:-ghcr.io/kjell5317/kotx-app:latest}
+    command:
+      ["node_modules/.bin/node-pg-migrate", "up", "-m", "migrations", "-j", "sql"]
+    env_file: .env
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ${KOTX_IMAGE:-ghcr.io/kjell5317/kotx-app:latest}
     restart: unless-stopped
     command: ["node", "packages/app/dist/index.js"]
     env_file: .env
     environment:
       CONFIG_DIR: /app/config
+      PROMPTS_DIR: /app/prompts
+    volumes:
+      # mount config/prompts from the repo so edits don't need an image rebuild
+      - ./config:/app/config:ro
+      - ./prompts:/app/prompts:ro
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
+      migrate:
+        condition: service_completed_successfully
 
   worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ${KOTX_IMAGE:-ghcr.io/kjell5317/kotx-app:latest}
     restart: unless-stopped
     command: ["node", "packages/worker/dist/index.js"]
     env_file: .env
@@ -44,11 +58,15 @@ services:
       # host data dirs must be visible at identical paths so bind mounts the
       # worker hands to codex-runner resolve on the host daemon.
       - ${AGENT_DATA_DIR:-/srv/agent}:${AGENT_DATA_DIR:-/srv/agent}
+      - ./config:/app/config:ro
+      - ./prompts:/app/prompts:ro
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_started
+      migrate:
+        condition: service_completed_successfully
 
   postgres:
     image: postgres:16

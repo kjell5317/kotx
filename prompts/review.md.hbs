@@ -1,7 +1,7 @@
-# Task: review pull request #{{subjectNumber}}
+# Task: continue work on pull request #{{subjectNumber}}
 
 Repository: {{repoFullName}}
-The PR head is checked out at /workspace.
+PR branch (already checked out at /workspace): {{branchName}}
 
 ## PR title
 {{title}}
@@ -9,29 +9,44 @@ The PR head is checked out at /workspace.
 ## PR description
 {{body}}
 
-## Review Mode
+## Working agreement
 
-You are reviewing this pull request from scratch.
+- `/workspace` is the PR's own branch. Make your changes directly there — they
+  will be pushed back to this PR.
+- You may run any commands you need — build, tests, linters, package managers.
+  This container is your sandbox.
+- Network access is available and you run as root: install whatever the project
+  needs (`uv`, `pip`, `npm`/`pnpm`/`yarn`, or system packages via `apt-get`).
+  Node and Python 3 (with `uv`) are preinstalled.
+- Do not touch git history or remotes. The host commits and pushes after you
+  finish.
 
-Do not rely on previous conversations, previous agent runs, cached assumptions,
-or earlier summaries. Inspect the diff, relevant surrounding code, tests, and
-repository conventions directly.
+## What to do
 
-**Do not modify code in review mode.** Produce a review only.
+Advance the pull request: implement requested changes, fix problems, and finish
+the work described above. Keep changes focused and consistent with the existing
+code and the PR's intent.
 
-Your review must include:
+## Definition of Done
 
-1. Summary of what the PR changes.
-2. Potential correctness issues.
-3. Security or data-safety concerns.
-4. Missing edge cases.
-5. Missing or weak tests.
-6. Maintainability concerns.
-7. Whether the implementation matches the PR description.
-8. A clear recommendation: **approve** / **request changes** / **comment only**.
+1. The work is implemented, focused, and consistent with the PR.
+2. Add or update tests where appropriate, and run the project's checks where you
+   can.
+3. Write a concise summary of what you changed to `/workspace/AGENT_RESULT.md`.
+4. Write a clear commit message (one-line subject + body) to
+   `/workspace/COMMIT_MSG.md`.
 
-## Output
+## Summary style (important)
 
-Write your full review as Markdown to `/workspace/REVIEW.md`. Also write a short
-`/workspace/AGENT_RESULT.md` noting that this was a review (no code changes).
-Do not write any other files. Do not write `COMMIT_MSG.md`.
+Write `AGENT_RESULT.md` as a normal PR update comment in plain, neutral voice.
+Do **not** refer to yourself as an AI, an agent, an assistant, or mention that
+the work was automated. Just describe what changed.
+
+### AGENT_RESULT.md template
+
+```markdown
+## Summary
+## Changes
+## Tests
+## Notes / follow-ups
+```

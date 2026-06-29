@@ -2,7 +2,6 @@ import { join } from "node:path";
 import pg from "pg";
 import { loadEnv } from "./config.js";
 import type {
-  HitlRequest,
   RunOutcome,
   SubjectType,
   Task,
@@ -189,24 +188,6 @@ export async function getLatestRun(
   return res.rows[0];
 }
 
-/** Creates the next attempt for a task, reusing the worktree path (HITL resume). */
-export async function createNextRun(
-  taskId: number,
-  worktreePath: string,
-): Promise<TaskRun> {
-  const res = await getPool().query<TaskRun>(
-    `INSERT INTO task_runs (task_id, attempt, worktree_path)
-     VALUES (
-       $1,
-       (SELECT COALESCE(MAX(attempt), 0) + 1 FROM task_runs WHERE task_id = $1),
-       $2
-     )
-     RETURNING *`,
-    [taskId, worktreePath],
-  );
-  return res.rows[0]!;
-}
-
 export async function markRunStarted(
   id: number,
   containerName: string,
@@ -234,93 +215,4 @@ export async function finishRun(
      WHERE id = $1`,
     [id, fields.outcome, fields.exitCode, fields.resultMd],
   );
-}
-
-// ── hitl_requests ─────────────────────────────────────────────────────────
-
-export async function createHitlRequest(input: {
-  taskId: number;
-  taskRunId: number;
-  reason: string;
-  proposedAction: string;
-  risk: string;
-  alternatives: string[];
-}): Promise<HitlRequest> {
-  const res = await getPool().query<HitlRequest>(
-    `INSERT INTO hitl_requests
-       (task_id, task_run_id, reason, proposed_action, risk, alternatives)
-     VALUES ($1,$2,$3,$4,$5,$6::jsonb)
-     RETURNING *`,
-    [
-      input.taskId,
-      input.taskRunId,
-      input.reason,
-      input.proposedAction,
-      input.risk,
-      JSON.stringify(input.alternatives),
-    ],
-  );
-  return res.rows[0]!;
-}
-
-export async function getHitlById(
-  id: number,
-): Promise<HitlRequest | undefined> {
-  const res = await getPool().query<HitlRequest>(
-    `SELECT * FROM hitl_requests WHERE id = $1`,
-    [id],
-  );
-  return res.rows[0];
-}
-
-export async function getOpenHitlForTask(
-  taskId: number,
-): Promise<HitlRequest | undefined> {
-  const res = await getPool().query<HitlRequest>(
-    `SELECT * FROM hitl_requests WHERE task_id = $1 AND state = 'open'`,
-    [taskId],
-  );
-  return res.rows[0];
-}
-
-export async function setHitlComment(
-  id: number,
-  commentId: number,
-): Promise<void> {
-  await getPool().query(`UPDATE hitl_requests SET comment_id = $2 WHERE id = $1`, [
-    id,
-    commentId,
-  ]);
-}
-
-export async function decideHitl(
-  id: number,
-  state: "approved" | "rejected" | "expired",
-  decidedBy: string | null,
-): Promise<void> {
-  await getPool().query(
-    `UPDATE hitl_requests
-     SET state = $2, decided_by = $3, decided_at = now()
-     WHERE id = $1`,
-    [id, state, decidedBy],
-  );
-}
-
-/** Tasks stuck awaiting approval past the TTL; returned with their open HITL. */
-export async function findExpiredApprovals(
-  ttlSeconds: number,
-): Promise<Array<{ task: Task; hitl: HitlRequest }>> {
-  const res = await getPool().query<HitlRequest & { _task: Task }>(
-    `SELECT h.*, to_jsonb(t.*) AS _task
-     FROM hitl_requests h
-     JOIN tasks t ON t.id = h.task_id
-     WHERE h.state = 'open'
-       AND t.state = 'awaiting_approval'
-       AND h.created_at < now() - ($1 || ' seconds')::interval`,
-    [String(ttlSeconds)],
-  );
-  return res.rows.map((row) => {
-    const { _task, ...hitl } = row;
-    return { task: _task, hitl: hitl as HitlRequest };
-  });
 }

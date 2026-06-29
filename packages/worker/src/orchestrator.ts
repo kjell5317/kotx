@@ -3,11 +3,9 @@ import { join } from "node:path";
 import {
   acquireRepoLock,
   clearCancelFlag,
-  createHitlRequest,
   enqueueTask,
   finishRun,
   getEnabledRepo,
-  getHitlById,
   getOctokit,
   getRun,
   getTask,
@@ -18,29 +16,26 @@ import {
   logger,
   markRunStarted,
   releaseRepoLock,
-  setHitlComment,
   setTaskBranch,
-  setTaskPr,
   setTaskState,
   TERMINAL_STATES,
+  type Task,
   type TaskJob,
 } from "@kotx/shared";
 import { ensureFreshAuth } from "./codexAuth.js";
 import {
   addImplementWorktree,
-  addReviewWorktree,
   commitAll,
   ensureMirrorFetched,
+  issueBranchName,
   mirrorPath,
   pushBranch,
   removeWorktree,
 } from "./git.js";
 import {
   fetchSubject,
-  openOrUpdatePr,
   postFailureComment,
-  postHitlComment,
-  postReview,
+  postSummary,
 } from "./githubOutputs.js";
 import { classifyOutcome, deleteArtifacts, readArtifacts } from "./outputs.js";
 import { containerName, killContainer, runCodexContainer } from "./runner.js";
@@ -95,6 +90,10 @@ async function runWithGuards(
   }
 }
 
+function defaultCommitMsg(task: Task): string {
+  return `Changes for #${task.subject_number}\n`;
+}
+
 export async function processJob(job: TaskJob): Promise<void> {
   const env = loadEnv();
   const task = await getTask(job.taskId);
@@ -119,7 +118,6 @@ export async function processJob(job: TaskJob): Promise<void> {
     loadDefaults().timeouts.repo_lock_buffer_sec;
   const gotLock = await acquireRepoLock(task.repo_full_name, holderId, lockTtl);
   if (!gotLock) {
-    // per-repo concurrency reached; re-queue this job with a short backoff
     await enqueueTask({ ...job });
     logger.debug({ repo: task.repo_full_name }, "repo busy; requeued");
     await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
@@ -149,50 +147,59 @@ export async function processJob(job: TaskJob): Promise<void> {
       task.subject_number,
     );
 
-    // --- prepare the worktree (resume reuses the existing one) ---
+    // Decide the branch to work on + where to start it from.
+    //  - issue  → a fresh GitHub-style branch off the default branch
+    //  - PR     → the PR's own head branch (so pushes update the PR)
+    let branch: string;
+    let startRef: string;
+    if (isReview) {
+      if (!subject.headRef) throw new Error("PR has no head ref");
+      if (
+        subject.headRepoFullName &&
+        subject.headRepoFullName !== task.repo_full_name
+      ) {
+        await finishRun(run.id, {
+          outcome: "failed",
+          exitCode: null,
+          resultMd: null,
+        });
+        await setTaskState(task.id, "failed");
+        await postFailureComment(
+          octokit,
+          task.repo_full_name,
+          task.subject_number,
+          "this PR comes from a fork, so its branch can't be pushed to",
+        );
+        return;
+      }
+      branch = subject.headRef;
+      startRef = subject.headRef;
+    } else {
+      branch = issueBranchName(task.subject_number, subject.title);
+      startRef = repo.default_branch;
+    }
+    await setTaskBranch(task.id, branch);
+
     const token = gitToken();
     await ensureMirrorFetched(task.repo_full_name, token);
+    await removeWorktree(task.repo_full_name, worktreePath);
+    await addImplementWorktree(
+      task.repo_full_name,
+      worktreePath,
+      branch,
+      startRef,
+    );
 
-    if (job.mode === "resume") {
-      // worktree already exists from the paused attempt; nothing to create
-    } else if (isReview) {
-      await removeWorktree(task.repo_full_name, worktreePath);
-      await addReviewWorktree(
-        task.repo_full_name,
-        worktreePath,
-        task.subject_number,
-      );
-    } else {
-      const branch = task.branch_name ?? `agent/issue-${task.subject_number}`;
-      await removeWorktree(task.repo_full_name, worktreePath);
-      await addImplementWorktree(
-        task.repo_full_name,
-        worktreePath,
-        branch,
-        repo.default_branch,
-      );
-      await setTaskBranch(task.id, branch);
-    }
-
-    // --- render TASK.md ---
-    let proposedAction: string | undefined;
-    if (job.mode === "resume" && job.hitlRequestId) {
-      const h = await getHitlById(job.hitlRequestId);
-      proposedAction = h?.proposed_action;
-    }
     const taskMd = renderTaskMd(job.mode, {
       repoFullName: task.repo_full_name,
       subjectType: task.subject_type,
       subjectNumber: task.subject_number,
-      branchName: task.branch_name ?? `agent/issue-${task.subject_number}`,
+      branchName: branch,
       title: subject.title,
       body: subject.body,
-      proposedAction,
-      approvalNote: job.approvalNote,
     });
     await writeFile(join(runOutputDir, "TASK.md"), taskMd, "utf8");
 
-    // --- run Codex ---
     await ensureFreshAuth();
     const guarded = await runWithGuards(
       name,
@@ -202,7 +209,6 @@ export async function processJob(job: TaskJob): Promise<void> {
       task.id,
     );
 
-    // --- classify + record ---
     const artifacts = await readArtifacts(worktreePath);
     const outcome = classifyOutcome({
       exitCode: guarded.exitCode,
@@ -217,83 +223,30 @@ export async function processJob(job: TaskJob): Promise<void> {
     });
     logger.info({ taskId: task.id, runId: run.id, outcome }, "run finished");
 
-    // --- act on outcome ---
-    if (outcome === "needs_approval" && artifacts.hitl) {
-      const hitl = await createHitlRequest({
-        taskId: task.id,
-        taskRunId: run.id,
-        reason: artifacts.hitl.reason,
-        proposedAction: artifacts.hitl.proposed_action,
-        risk: artifacts.hitl.risk,
-        alternatives: artifacts.hitl.alternatives,
-      });
-      const commentId = await postHitlComment(
-        octokit,
-        task.repo_full_name,
-        task.subject_number,
-        artifacts.hitl,
-        run.id,
-      );
-      await setHitlComment(hitl.id, commentId);
-      await setTaskState(task.id, "awaiting_approval");
-      // keep the worktree — the resume attempt reuses it
-      return;
-    }
-
-    if (outcome === "completed" && isReview) {
-      await postReview(
-        octokit,
-        task.repo_full_name,
-        task.subject_number,
-        artifacts.review ?? artifacts.resultMd ?? "_(no review produced)_",
-        run.id,
-      );
-      await setTaskState(task.id, "done");
-      await removeWorktree(task.repo_full_name, worktreePath);
-      return;
-    }
-
     if (outcome === "completed") {
-      // implement / resume → commit, push, open/update PR
-      const branch = task.branch_name ?? `agent/issue-${task.subject_number}`;
+      // commit + push the branch (if there are changes), then post a summary.
+      // No PR is ever opened.
       const msgFile = join(runOutputDir, "COMMIT_MSG.txt");
       await writeFile(
         msgFile,
-        artifacts.commitMsg ??
-          `agent: changes for #${task.subject_number}\n\nAutomated by kotx (run #${run.id}).`,
+        artifacts.commitMsg ?? defaultCommitMsg(task),
         "utf8",
       );
       await deleteArtifacts(worktreePath);
       const committed = await commitAll(worktreePath, msgFile);
-      if (!committed) {
-        await setTaskState(task.id, "failed");
-        await postFailureComment(
-          octokit,
-          task.repo_full_name,
-          task.subject_number,
-          "produced no changes",
-          run.id,
-        );
-        await removeWorktree(task.repo_full_name, worktreePath);
-        return;
-      }
-      await pushBranch(task.repo_full_name, branch, gitToken());
-      const prNumber = await openOrUpdatePr(octokit, {
-        repoFullName: task.repo_full_name,
-        branch,
-        base: repo.default_branch,
-        issueNumber: task.subject_number,
-        title: subject.title,
-        resultMd: artifacts.resultMd ?? "(no summary)",
-        runId: run.id,
-      });
-      await setTaskPr(task.id, prNumber);
+      if (committed) await pushBranch(task.repo_full_name, branch, gitToken());
+
+      const summary = artifacts.resultMd ?? "Done.";
+      const body =
+        !isReview && committed
+          ? `${summary}\n\nChanges pushed to \`${branch}\`.`
+          : summary;
+      await postSummary(octokit, task.repo_full_name, task.subject_number, body);
       await setTaskState(task.id, "done");
       await removeWorktree(task.repo_full_name, worktreePath);
       return;
     }
 
-    // failed / timed_out / cancelled
     const finalState =
       outcome === "timed_out"
         ? "timed_out"
@@ -306,8 +259,7 @@ export async function processJob(job: TaskJob): Promise<void> {
         octokit,
         task.repo_full_name,
         task.subject_number,
-        finalState === "timed_out" ? "timed out" : "failed",
-        run.id,
+        finalState === "timed_out" ? "the run timed out" : "the run failed",
       );
     }
     await removeWorktree(task.repo_full_name, worktreePath);

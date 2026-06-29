@@ -60,13 +60,31 @@ npm run typecheck             # whole-workspace type check
 export CODEX_HOME=/srv/agent/codex-home
 codex login --device-auth
 
-# bring up postgres/redis/app/worker/proxy
-docker compose up -d --build
-docker compose run --rm app node node_modules/.bin/node-pg-migrate up   # or run migrations from host
-
-# build the runner image the worker launches
-docker build -t codex-runner:latest runner/
+# pull the prebuilt images from GHCR (see "Images & CI" below) and start.
+# the `migrate` service applies pending DB migrations automatically before
+# app/worker start — no manual migrate step needed.
+docker compose pull
+docker compose up -d
 ```
+
+## Images & CI
+
+`.github/workflows/build-images.yml` builds and pushes two images to GHCR on
+every push to `main` (and on `v*` tags):
+
+- `ghcr.io/<owner>/kotx-app` — the app + worker (root `Dockerfile`)
+- `ghcr.io/<owner>/kotx-runner` — the short-lived `codex-runner`
+
+Compose pulls `kotx-app` for both the `app` and `worker` services
+(`KOTX_IMAGE`). The worker pulls `kotx-runner` itself the first time it launches
+a task (`CODEX_RUNNER_IMAGE`); set `GHCR_USERNAME`/`GHCR_TOKEN` (a PAT with
+`read:packages`) if the packages are private. `config/` and `prompts/` are
+bind-mounted from the cloned repo, so editing `repos.yml` needs only a
+`docker compose up -d`, not a rebuild.
+
+To deploy a new version: merge to `main` → wait for CI → on the VPS
+`docker compose pull && docker compose up -d` (and `docker pull` the runner
+image, or just let the worker re-pull on a fresh tag).
 
 ## Status vs SPEC
 

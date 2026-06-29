@@ -25,8 +25,6 @@ export type RunOutcome =
   | "timed_out"
   | "cancelled";
 
-export type HitlState = "open" | "approved" | "rejected" | "expired";
-
 export type SubjectType = "issue" | "pull_request";
 
 export interface Task {
@@ -57,23 +55,8 @@ export interface TaskRun {
   result_md: string | null;
 }
 
-export interface HitlRequest {
-  id: number;
-  task_id: number;
-  task_run_id: number;
-  state: HitlState;
-  reason: string;
-  proposed_action: string;
-  risk: string;
-  alternatives: string[];
-  comment_id: number | null;
-  decided_by: string | null;
-  decided_at: Date | null;
-  created_at: Date;
-}
-
 // BullMQ job payload (SPEC §7)
-export type JobMode = "implement" | "review" | "resume";
+export type JobMode = "implement" | "review";
 
 export interface TaskJob {
   taskId: number;
@@ -81,24 +64,15 @@ export interface TaskJob {
   mode: JobMode;
   repoFullName: string;
   subject: { type: SubjectType; number: number };
-  // resume only:
-  hitlRequestId?: number;
-  approvalNote?: string;
 }
 
 export const TASK_QUEUE_NAME = "tasks";
 
 // Parsed intent from a webhook (SPEC §6.3)
-export type AgentCommand =
-  | "run"
-  | "review"
-  | "stop"
-  | "status"
-  | "approve"
-  | "reject";
+export type AgentCommand = "run" | "review" | "stop" | "status";
 
 export interface Intent {
-  kind: TaskKind | null; // null for stop/status/approve/reject
+  kind: TaskKind | null; // null for stop/status
   command: AgentCommand | null; // null when triggered purely by a label
   source: "command" | "label";
 }

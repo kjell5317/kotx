@@ -6,7 +6,7 @@ export const LABELS = {
   ignore: "agent:ignore",
 } as const;
 
-const COMMAND_RE = /^\/agent\s+(run|review|stop|status|approve|reject)\b/;
+const COMMAND_RE = /^\/agent\s+(run|review|stop|status)\b/;
 
 /** Parse the first non-empty line of a comment body for an /agent command. */
 export function parseCommand(body: string): AgentCommand | null {

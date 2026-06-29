@@ -1,13 +1,10 @@
 import {
-  createNextRun,
   createTaskWithRun,
-  decideHitl,
   enqueueTask,
   findActiveTask,
   getEnabledRepo,
-  getOctokit,
   getLatestRun,
-  getOpenHitlForTask,
+  getOctokit,
   hasIgnoreLabel,
   intentFromLabels,
   kindFromCommand,
@@ -34,8 +31,7 @@ async function comment(
   body: string,
 ): Promise<void> {
   try {
-    const octokit = getOctokit();
-    await postIssueComment(octokit, repoFullName, issueNumber, body);
+    await postIssueComment(getOctokit(), repoFullName, issueNumber, body);
   } catch (err) {
     logger.warn({ err, repoFullName, issueNumber }, "failed to post comment");
   }
@@ -50,20 +46,17 @@ export async function ingest(n: Normalized): Promise<IngestResult> {
   if (hasIgnoreLabel(subject.labels))
     return { status: "ignored", reason: "agent:ignore" };
 
-  // Comment events trigger ONLY via an explicit /agent command. This prevents a
-  // self-loop now that the agent comments as the user (PAT identity): the
-  // agent's own comments aren't commands, so they're ignored here.
+  // Comment events trigger ONLY via an explicit /agent command (prevents a
+  // self-loop now that comments are posted under the user's identity).
   if (n.comment) {
     const command = parseCommand(n.comment.body);
     if (!command) return { status: "ignored", reason: "no-command-on-comment" };
-    // commands are honored ONLY from the single authorized commander (SPEC §6.3)
     if (n.comment.authorLogin !== repo.assignee_login)
       return { status: "ignored", reason: "unauthorized-commander" };
     return handleCommand(command, repo, subject, n);
   }
 
-  // Label-driven triggering fires only when a trigger label is ADDED, not on
-  // every issue/PR edit, so unrelated activity can't re-launch a run.
+  // Label triggering fires only when a trigger label is ADDED.
   if (n.action !== "labeled")
     return { status: "ignored", reason: "non-trigger-action" };
   const labelIntent = intentFromLabels(subject.labels);
@@ -81,17 +74,12 @@ async function handleCommand(
   const by = n.comment!.authorLogin;
   switch (command) {
     case "run":
-    case "review": {
-      const kind = kindFromCommand(command)!;
-      return startCandidate(repo, subject, kind, by);
-    }
+    case "review":
+      return startCandidate(repo, subject, kindFromCommand(command)!, by);
     case "stop":
       return handleStop(repo, subject);
     case "status":
       return handleStatus(repo, subject);
-    case "approve":
-    case "reject":
-      return handleDecision(command, repo, subject, n);
     default:
       return { status: "ignored", reason: "unknown-command" };
   }
@@ -117,20 +105,19 @@ async function startCandidate(
     await comment(
       repo.full_name,
       subject.number,
-      `🤖 A task is already ${active.state} for this ${subject.type} (task #${active.id}). Use \`/agent stop\` first.`,
+      `A task is already ${active.state} for this ${subject.type} (#${active.id}). Use \`/agent stop\` first.`,
     );
     return { status: "ignored", reason: "already-active" };
   }
 
-  const branchName =
-    kind === "implement" ? `agent/issue-${subject.number}` : null;
-
+  // The worker derives the branch name (it needs the issue/PR title), so leave
+  // it null here.
   const created = await createTaskWithRun({
     repoFullName: repo.full_name,
     subjectType: subject.type,
     subjectNumber: subject.number,
     kind,
-    branchName,
+    branchName: null,
     triggeredBy,
     dataDir: loadEnv().agentDataDir,
   });
@@ -164,17 +151,10 @@ async function handleStop(
   await setCancelFlag(active.id);
   if (active.state === "running") {
     // worker observes the cancel flag, kills the container, sets 'cancelled'
-    await comment(repo.full_name, subject.number, `🤖 Stopping task #${active.id}…`);
+    await comment(repo.full_name, subject.number, `Stopping #${active.id}…`);
   } else {
-    // queued or awaiting_approval — cancel directly
-    const open = await getOpenHitlForTask(active.id);
-    if (open) await decideHitl(open.id, "rejected", null);
     await setTaskState(active.id, "cancelled");
-    await comment(
-      repo.full_name,
-      subject.number,
-      `🤖 Cancelled task #${active.id}.`,
-    );
+    await comment(repo.full_name, subject.number, `Cancelled #${active.id}.`);
   }
   return { status: "handled", action: "stop" };
 }
@@ -192,79 +172,15 @@ async function handleStatus(
     await comment(
       repo.full_name,
       subject.number,
-      `🤖 No active task for this ${subject.type}.`,
+      `No active task for this ${subject.type}.`,
     );
     return { status: "handled", action: "status" };
   }
   const run = await getLatestRun(active.id);
-  const prLink = active.pr_number ? ` · PR #${active.pr_number}` : "";
   await comment(
     repo.full_name,
     subject.number,
-    `🤖 Task #${active.id}: **${active.state}** (${active.kind}, attempt ${run?.attempt ?? 1})${prLink}.`,
+    `#${active.id}: ${active.state} (${active.kind}, attempt ${run?.attempt ?? 1}).`,
   );
   return { status: "handled", action: "status" };
-}
-
-async function handleDecision(
-  command: "approve" | "reject",
-  repo: RepoConfig,
-  subject: NormalizedSubject,
-  n: Normalized,
-): Promise<IngestResult> {
-  const active = await findActiveTask(
-    repo.full_name,
-    subject.type,
-    subject.number,
-  );
-  if (!active || active.state !== "awaiting_approval") {
-    await comment(
-      repo.full_name,
-      subject.number,
-      `🤖 No pending approval to ${command}.`,
-    );
-    return { status: "ignored", reason: "no-open-hitl" };
-  }
-  const open = await getOpenHitlForTask(active.id);
-  if (!open) {
-    await comment(
-      repo.full_name,
-      subject.number,
-      `🤖 No pending approval to ${command}.`,
-    );
-    return { status: "ignored", reason: "no-open-hitl" };
-  }
-
-  const by = n.comment!.authorLogin;
-  if (command === "reject") {
-    await decideHitl(open.id, "rejected", by);
-    await setTaskState(active.id, "cancelled");
-    await comment(
-      repo.full_name,
-      subject.number,
-      `🤖 Rejected. Task #${active.id} cancelled.`,
-    );
-    return { status: "handled", action: "reject" };
-  }
-
-  // approve → new attempt reusing the same worktree, resume job enqueued
-  await decideHitl(open.id, "approved", by);
-  const latest = await getLatestRun(active.id);
-  const worktreePath = latest?.worktree_path ?? "";
-  const next = await createNextRun(active.id, worktreePath);
-  await enqueueTask({
-    taskId: active.id,
-    taskRunId: next.id,
-    mode: "resume",
-    repoFullName: repo.full_name,
-    subject: { type: subject.type, number: subject.number },
-    hitlRequestId: open.id,
-    approvalNote: n.comment!.body,
-  });
-  await comment(
-    repo.full_name,
-    subject.number,
-    `🤖 Approved. Resuming task #${active.id} (attempt ${next.attempt})…`,
-  );
-  return { status: "handled", action: "approve" };
 }

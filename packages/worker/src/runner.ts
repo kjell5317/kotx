@@ -23,6 +23,40 @@ export function containerName(taskRunId: number): string {
   return `codex-task-${taskRunId}`;
 }
 
+/** The runner image: env override (e.g. a GHCR ref) wins over the config default. */
+function runnerImage(): string {
+  return process.env.CODEX_RUNNER_IMAGE ?? loadDefaults().container.image;
+}
+
+/** Auth for pulling a private GHCR image, or undefined for public images. */
+function ghcrAuthConfig(): Docker.AuthConfig | undefined {
+  const password = process.env.GHCR_TOKEN ?? process.env.GITHUB_TOKEN;
+  if (!password) return undefined;
+  return {
+    username: process.env.GHCR_USERNAME ?? "x-access-token",
+    password,
+    serveraddress: "ghcr.io",
+  };
+}
+
+/** Pull the runner image if it isn't present locally (no-op if already pulled). */
+async function ensureImage(dk: Docker, image: string): Promise<void> {
+  try {
+    await dk.getImage(image).inspect();
+    return; // already present
+  } catch {
+    /* not present — pull below */
+  }
+  logger.info({ image }, "pulling runner image");
+  const authconfig = ghcrAuthConfig();
+  await new Promise<void>((resolve, reject) => {
+    dk.pull(image, { authconfig }, (err, stream) => {
+      if (err || !stream) return reject(err ?? new Error("no pull stream"));
+      dk.modem.followProgress(stream, (e) => (e ? reject(e) : resolve()));
+    });
+  });
+}
+
 /**
  * Run one short-lived codex-runner container. The container reads TASK.md from
  * the run-output dir and writes codex.jsonl there; it edits the worktree at
@@ -68,8 +102,10 @@ export async function runCodexContainer(opts: {
   }
 
   const dk = getDocker();
+  const image = runnerImage();
+  await ensureImage(dk, image);
   const created = await dk.createContainer({
-    Image: c.image,
+    Image: image,
     name: opts.name,
     WorkingDir: "/workspace",
     Env: [`CODEX_HOME=/home/codex/.codex`],

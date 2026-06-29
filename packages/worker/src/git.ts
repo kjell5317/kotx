@@ -57,22 +57,18 @@ export async function addImplementWorktree(
   ]);
 }
 
-/** Create a detached worktree at a PR head (review mode). */
-export async function addReviewWorktree(
-  repoFullName: string,
-  worktreePath: string,
-  prNumber: number,
-): Promise<void> {
-  const mirror = mirrorPath(repoFullName);
-  await run("git", [
-    "-C",
-    mirror,
-    "worktree",
-    "add",
-    "--detach",
-    worktreePath,
-    `refs/remotes/origin/pull/${prNumber}`,
-  ]);
+/**
+ * GitHub's default branch name for an issue: "<number>-<slugified-title>"
+ * (e.g. issue #31 "Add metadata index" → "31-add-metadata-index").
+ */
+export function issueBranchName(issueNumber: number, title: string): string {
+  const slug = title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 50)
+    .replace(/-+$/, "");
+  return slug ? `${issueNumber}-${slug}` : `${issueNumber}`;
 }
 
 /** Stage everything and commit. Returns false if there was nothing to commit. */
