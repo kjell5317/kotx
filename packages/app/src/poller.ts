@@ -203,7 +203,7 @@ async function pollCommands(
       repoFullName: repo.full_name,
       senderLogin: author,
       subject,
-      comment: { body, authorLogin: author },
+      comment: { body, authorLogin: author, htmlUrl: c.html_url ?? "" },
     };
     const result = await ingest(n);
     logger.info(

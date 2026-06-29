@@ -91,6 +91,7 @@ export async function createTaskWithRun(input: {
   kind: TaskKind;
   branchName: string | null;
   triggeredBy: string;
+  triggerCommentUrl?: string | null;
   dataDir: string;
 }): Promise<{ task: Task; run: TaskRun } | undefined> {
   const client = await getPool().connect();
@@ -100,8 +101,8 @@ export async function createTaskWithRun(input: {
     try {
       const t = await client.query<Task>(
         `INSERT INTO tasks
-           (repo_full_name, subject_type, subject_number, kind, state, branch_name, triggered_by)
-         VALUES ($1,$2,$3,$4,'queued',$5,$6)
+           (repo_full_name, subject_type, subject_number, kind, state, branch_name, triggered_by, trigger_comment_url)
+         VALUES ($1,$2,$3,$4,'queued',$5,$6,$7)
          RETURNING *`,
         [
           input.repoFullName,
@@ -110,6 +111,7 @@ export async function createTaskWithRun(input: {
           input.kind,
           input.branchName,
           input.triggeredBy,
+          input.triggerCommentUrl ?? null,
         ],
       );
       task = t.rows[0]!;
@@ -166,6 +168,39 @@ export async function setTaskPr(id: number, prNumber: number): Promise<void> {
     id,
     prNumber,
   ]);
+}
+
+// ── listings (for the web UI) ───────────────────────────────────────────────
+
+export interface RunListItem {
+  run_id: number;
+  attempt: number;
+  outcome: RunOutcome | null;
+  started_at: Date | null;
+  finished_at: Date | null;
+  task_id: number;
+  repo_full_name: string;
+  subject_type: SubjectType;
+  subject_number: number;
+  kind: TaskKind;
+  state: TaskState;
+  created_at: Date;
+  updated_at: Date;
+}
+
+export async function listRuns(limit = 200): Promise<RunListItem[]> {
+  const res = await getPool().query<RunListItem>(
+    `SELECT
+       r.id AS run_id, r.attempt, r.outcome, r.started_at, r.finished_at,
+       t.id AS task_id, t.repo_full_name, t.subject_type, t.subject_number,
+       t.kind, t.state, t.created_at, t.updated_at
+     FROM task_runs r
+     JOIN tasks t ON t.id = r.task_id
+     ORDER BY r.id DESC
+     LIMIT $1`,
+    [limit],
+  );
+  return res.rows;
 }
 
 // ── task_runs ───────────────────────────────────────────────────────────────

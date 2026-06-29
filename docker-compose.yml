@@ -35,6 +35,8 @@ services:
       # mount config/prompts from the repo so edits don't need an image rebuild
       - ./config:/app/config:ro
       - ./prompts:/app/prompts:ro
+      # read-only access to run dirs so the UI can serve TASK.md files
+      - ${AGENT_DATA_DIR:-/srv/agent}:${AGENT_DATA_DIR:-/srv/agent}:ro
     depends_on:
       postgres:
         condition: service_healthy

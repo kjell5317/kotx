@@ -1,635 +1,311 @@
-# Concurrent Codex Agent — Technical Spec
+# kotx — Personal Codex Agent (as-built spec)
 
-Status: draft v1 · Scope: decision-complete spec for the MVP, no app code yet.
-
-This document refines the implementation plan into something buildable. Every
-ambiguity in the original plan is resolved here with a concrete decision. Places
-where this spec **deviates** from the original plan are marked **[DEVIATION]**
-with the reason. Genuinely open choices that need your input are collected in
-§16.
+Status: v2 · This describes the system **as built and deployed**, which has
+diverged substantially from the original design (GitHub App + HITL + PR
+opening). The original design notes are summarized in §13 (Changelog) for
+context. For how to run it, see [README.md](README.md).
 
 ---
 
-## 0. Key decisions (read this first)
+## 1. What's working
 
-| # | Decision | Why |
-|---|----------|-----|
-| D1 | **Language: TypeScript on Node 20+.** | Best GitHub ecosystem (`@octokit/*`, `@octokit/webhooks`), mature Redis queue (BullMQ). Python is a viable alt but loses tooling here. |
-| D2 | **The worker — not the Codex container — owns all git operations** (fetch, worktree add, commit, push). The Codex container only edits files and writes output files. **[DEVIATION]** | Solves three problems at once: (a) `git worktree`'s `.git` gitfile points to an absolute host path outside the container mount, so commits *inside* the container would fail anyway; (b) the Codex container then needs **no** git credentials and no network git access — much tighter isolation; (c) commit/push policy stays centralized. Codex suggests the commit message; the worker authors the commit. |
-| D3 | **HITL pause/resume is implemented as stateless re-runs, not live session suspension.** On approval, the worker starts a *fresh* `codex exec` whose prompt includes the prior approval decision; the worktree already holds prior edits. **[DEVIATION]** | `codex exec` is one-shot and non-interactive — there is no process to "pause". Re-running against the persisted worktree is robust and avoids depending on Codex session-storage internals. Faithful session-resume (`codex exec resume`) is a post-MVP upgrade (§16). |
-| D4 | **Codex auth is refreshed host-side in a pre-flight step; containers mount the auth dir read-only.** **[DEVIATION]** | ChatGPT/Codex subscription tokens expire and need refresh. A read-only mount cannot refresh; a read-write mount shared across concurrent containers races. Host-side pre-flight refresh keeps the mount read-only and race-free. |
-| D5 | **Per-repo config lives centrally on the agent host (`config/repos.yml`), never read from the target repo.** **[DEVIATION]** | Reading config from the target repo lets any repo escalate its own privileges. Config is operator-controlled only. |
-| D6 | **Output files are the source of truth for task outcome; container exit code is secondary.** | Codex's exit code is a weak signal. The presence/contents of `AGENT_RESULT.md` and `HITL_REQUEST.json` deterministically classify the outcome. |
+Verified end-to-end on `TUM-Social-AI/AflaConnect` during bring-up:
 
-Everything else follows the original plan.
+- **Ingestion → queue → worker.** Webhook receiver verifies the HMAC signature,
+  de-dupes deliveries, checks eligibility, creates a task, and enqueues it.
+  Tasks flow `queued → running → done/failed`.
+- **GitHub auth via PAT.** All REST + git-over-HTTPS uses a personal access
+  token; the agent acts as the user (commits, pushes, comments are yours).
+- **Per-repo locking + worktrees.** The worker takes a Redis repo lock, fetches
+  the bare mirror, and creates an isolated git worktree. Branch creation is
+  idempotent across retries (`git worktree add -B`).
+- **Codex actually runs.** Inside the runner container Codex authenticates,
+  resolves git, has network + root, and `node`/`python`/`uv` available; it
+  inspects the repo, makes changes, and writes a summary (`AGENT_RESULT.md`) and
+  commit message (`COMMIT_MSG.md`).
+- **CI images + auto-migrate.** GitHub Actions builds and pushes `kotx-app` and
+  `kotx-runner` to GHCR; compose runs a one-shot `migrate` service before
+  app/worker start.
 
----
+**Pending verification** (implemented, not yet confirmed live):
 
-## 1. Tech stack
-
-```
-Runtime        Node 20 LTS, TypeScript (strict)
-Web            Fastify
-GitHub         @octokit/app, @octokit/webhooks, @octokit/rest
-Queue          BullMQ on Redis 7
-DB             PostgreSQL 16, accessed via `pg`; migrations via node-pg-migrate
-Container ctl  dockerode (Docker Engine API) from the worker
-Proxy          Caddy (automatic TLS)
-Codex          Codex CLI inside `codex-runner` image, `codex exec --json`
-Config         YAML (config/*.yml), validated with zod
-```
-
-Two long-running services share Postgres + Redis:
-
-- **app** — Fastify HTTP server: receives webhooks, validates, persists, enqueues.
-- **worker** — BullMQ consumer: orchestrates git + Docker + Codex, posts to GitHub.
-
-The worker launches short-lived `codex-runner` containers via the Docker socket.
-**The Docker socket is mounted into the *worker* only, never into a
-`codex-runner` container.**
+- The tail of the issue happy path — worker **commits, pushes the branch, and
+  posts the summary comment** (no PR). Should work; confirm on a real issue.
+- The **PR path** (push to the PR's head branch). The code is in place but the
+  last live run hit a stale worker image; re-verify after redeploying the worker.
+- **Polling mode** end-to-end on a `poll: true` repo.
 
 ---
 
-## 2. Repository layout
+## 2. Next steps
 
-```
-kotx/
-├─ SPEC.md
-├─ docker-compose.yml
-├─ Caddyfile
-├─ .env.example
-├─ config/
-│  ├─ repos.yml              # allowlist + per-repo overrides (operator-owned)
-│  └─ defaults.yml           # global defaults
-├─ migrations/               # node-pg-migrate SQL
-├─ packages/
-│  ├─ shared/                # db client, types, config loader, github client, zod schemas
-│  ├─ app/                   # Fastify webhook receiver
-│  └─ worker/                # queue consumer + orchestrator
-├─ runner/
-│  ├─ Dockerfile             # codex-runner image
-│  └─ entrypoint.sh
-└─ prompts/
-   ├─ implement.md.hbs       # TASK.md template for /agent run
-   ├─ review.md.hbs          # review-mode prompt
-   └─ resume.md.hbs          # HITL resume prompt
-```
+Ordered roughly by priority:
 
-Host data dirs (outside the repo, on the VPS):
-
-```
-/srv/agent/repos/OWNER__REPO.git      # bare mirror, one per repo
-/srv/agent/worktrees/<task_run_id>/   # one per run, never reused
-/srv/agent/runs/<task_run_id>/        # container output (codex.jsonl, AGENT_RESULT.md, …)
-/srv/agent/codex-home/                # CODEX_HOME, host-refreshed, mounted RO
-```
+1. **Confirm the issue happy path** (commit → push `<n>-<slug>` → summary
+   comment) and the **PR path** (push to PR head) on freshly-deployed images.
+2. **Egress policy.** Today the runner uses the default `bridge` network (open
+   egress) — required because Codex installs dependencies at runtime. If you
+   later want to restrict egress, you must either bake all deps into the runner
+   image or run a per-project setup step. Tracked but intentionally open.
+3. **Poll comment cursor persistence.** The poller's "comments since" cursor is
+   in-memory with a 1h startup lookback; comments during a >1h outage can be
+   missed (labels can't be — they're level-triggered). Persist the cursor in a
+   small table to close the gap.
+4. **Per-repo concurrency > 1.** The repo lock is a single slot
+   (`max_workers_per_repo` effectively 1). Use N lock slots if you want parallel
+   tasks per repo.
+5. **Re-run / force-push edge case.** Re-running implement on an issue whose
+   branch already exists resets the local branch to base (`-B`) and publishes
+   with `--force-with-lease` on worker-owned issue branches. PR-review pushes
+   stay normal fast-forward pushes so user-owned branch updates are not
+   overwritten.
+6. **Toolchain coverage.** Runner has Node + Python + uv. Codex `apt-get`s the
+   rest at runtime; bake in more (e.g. `build-essential`, Go, Rust) if common.
+7. **Observability / retention.** Run logs (`/srv/agent/runs/<id>/codex.jsonl`)
+   and worktrees accumulate; add retention/cleanup and basic metrics.
+8. **Token refresh.** Each run gets a private **writable** `CODEX_HOME` copy, so
+   Codex can refresh an expiring token mid-run. Long-idle hosts may still want a
+   host-side pre-refresh (`CODEX_REFRESH_CMD`, already wired, currently unset).
 
 ---
 
-## 3. Configuration
+## 3. Goal
 
-### 3.1 `config/defaults.yml`
-
-```yaml
-concurrency:
-  max_global_workers: 2
-  max_workers_per_repo: 1
-timeouts:
-  task_wall_clock_sec: 1800          # hard kill of a codex-runner
-  awaiting_approval_ttl_sec: 172800  # 48h, then auto-cancel
-container:
-  cpus: 2
-  memory: "4g"
-  image: "codex-runner:latest"
-codex:
-  sandbox: "workspace-write"
-  auth_refresh_skew_sec: 600         # refresh if token expires within 10 min
-policy:
-  auto_merge: false                  # invariant, not configurable per repo
-  auto_deploy: false                 # invariant
-  require_label_or_command: true
-```
-
-### 3.2 `config/repos.yml`
-
-```yaml
-repos:
-  - full_name: "kjell/example"
-    enabled: true
-    default_branch: "main"
-    assignee_login: "kjell"          # task eligible only if assigned to this login
-    allow_infra_changes: false
-    allow_secret_access: false
-    overrides:
-      max_workers_per_repo: 1
-```
-
-A repo not present (or `enabled: false`) is rejected at the webhook stage.
-`auto_merge`/`auto_deploy` are **invariants** and cannot be enabled anywhere.
+A private coding agent that reacts to GitHub issues/PRs assigned to me, runs
+Codex in isolated Docker containers on a Hetzner VPS, and **pushes branches +
+posts plain summaries as me**. It never opens PRs, never merges, never deploys,
+and nothing it writes should read as machine-authored.
 
 ---
 
-## 4. Data model (PostgreSQL)
+## 4. Architecture
 
-```sql
--- enums ---------------------------------------------------------------
-CREATE TYPE task_kind   AS ENUM ('implement', 'review');
-CREATE TYPE task_state  AS ENUM (
-  'queued', 'running', 'awaiting_approval',
-  'done', 'failed', 'cancelled', 'timed_out'
-);
-CREATE TYPE run_outcome AS ENUM (
-  'completed', 'needs_approval', 'failed', 'timed_out', 'cancelled'
-);
-CREATE TYPE hitl_state  AS ENUM ('open', 'approved', 'rejected', 'expired');
-
--- one logical unit of work, keyed to a GitHub issue/PR -----------------
-CREATE TABLE tasks (
-  id              BIGSERIAL PRIMARY KEY,
-  repo_full_name  TEXT        NOT NULL,
-  subject_type    TEXT        NOT NULL,            -- 'issue' | 'pull_request'
-  subject_number  INTEGER     NOT NULL,
-  kind            task_kind   NOT NULL,
-  state           task_state  NOT NULL DEFAULT 'queued',
-  branch_name     TEXT,                            -- agent/issue-NN or agent/task-<id>
-  pr_number       INTEGER,                         -- set once a PR exists
-  triggered_by    TEXT        NOT NULL,            -- github login
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-  -- at most one active task per (repo, subject); see §8
-  CONSTRAINT uq_active_subject UNIQUE (repo_full_name, subject_type, subject_number, state)
-    DEFERRABLE INITIALLY IMMEDIATE
-);
--- Note: the UNIQUE above is illustrative; active-task uniqueness is enforced
--- via a partial unique index instead (a subject may have many terminal-state rows):
-CREATE UNIQUE INDEX uq_one_active_task
-  ON tasks (repo_full_name, subject_type, subject_number)
-  WHERE state IN ('queued', 'running', 'awaiting_approval');
-
--- one execution attempt of a task (re-runs after HITL create new rows) --
-CREATE TABLE task_runs (
-  id              BIGSERIAL PRIMARY KEY,
-  task_id         BIGINT      NOT NULL REFERENCES tasks(id),
-  attempt         INTEGER     NOT NULL,            -- 1,2,3…
-  worktree_path   TEXT        NOT NULL,
-  container_name  TEXT,
-  outcome         run_outcome,
-  exit_code       INTEGER,
-  started_at      TIMESTAMPTZ,
-  finished_at     TIMESTAMPTZ,
-  jsonl_path      TEXT,                            -- /srv/agent/runs/<id>/codex.jsonl
-  result_md       TEXT,                            -- captured AGENT_RESULT.md
-  UNIQUE (task_id, attempt)
-);
-
--- webhook idempotency --------------------------------------------------
-CREATE TABLE github_deliveries (
-  delivery_id   TEXT PRIMARY KEY,                  -- X-GitHub-Delivery header
-  event         TEXT        NOT NULL,
-  received_at   TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- human-in-the-loop gates ---------------------------------------------
-CREATE TABLE hitl_requests (
-  id              BIGSERIAL PRIMARY KEY,
-  task_id         BIGINT      NOT NULL REFERENCES tasks(id),
-  task_run_id     BIGINT      NOT NULL REFERENCES task_runs(id),
-  state           hitl_state  NOT NULL DEFAULT 'open',
-  reason          TEXT        NOT NULL,
-  proposed_action TEXT        NOT NULL,
-  risk            TEXT        NOT NULL,            -- low|medium|high
-  alternatives    JSONB       NOT NULL DEFAULT '[]',
-  comment_id      BIGINT,                          -- the GitHub comment we posted
-  decided_by      TEXT,
-  decided_at      TIMESTAMPTZ,
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+```text
+GitHub issue/PR  ──(webhook)──┐
+   assigned to me             │        ┌── app: Fastify receiver + ingestion
+   + label / /agent command   ├──────▶ │   (also: poller for poll:true repos)
+                              ─┘        └── enqueue (Redis/BullMQ)
+                                                    │
+                                                    ▼
+                                         worker: one job at a time per repo
+                                          ├─ git worktree (host-side)
+                                          ├─ run codex-runner container
+                                          ├─ commit + push branch
+                                          └─ post summary comment
 ```
 
-`updated_at` is maintained by a trigger or in the data-access layer.
+Services (Docker Compose, all from CI-built GHCR images):
+
+```text
+proxy     Caddy (TLS, reverse proxy to app) — only needed for webhook repos
+app       webhook receiver + poller; enqueues jobs
+worker    BullMQ consumer; orchestrates git + Docker + Codex; posts to GitHub
+migrate   one-shot node-pg-migrate before app/worker start
+postgres  task state
+redis     job queue + locks/flags
+codex-runner   short-lived per-task container (launched by worker via the socket)
+```
+
+`app` and `worker` share one image (`kotx-app`). The worker launches
+`kotx-runner` containers via the Docker socket (mounted into the worker only).
 
 ---
 
-## 5. Task state machine
+## 5. GitHub integration
 
+### 5.1 Auth — personal access token
+A PAT (prefer fine-grained, scoped to the allowlisted repos: Contents, Issues,
+Pull requests r/w + Metadata) is used for both the REST API and git push/fetch.
+The agent therefore acts as **me**. No GitHub App, no installation tokens.
+
+### 5.2 Two input modes (per repo)
+- **Webhook** (`poll: false`): a repo webhook → `/github/webhook`, HMAC-verified.
+- **Polling** (`poll: true`): the app polls the repo every `POLL_INTERVAL_SEC`
+  for trigger labels and `/agent` commands — for repos where I can't register a
+  webhook. To avoid level-triggered re-firing, the **trigger label is removed
+  once a task is enqueued**; re-add it to run again. Comments are de-duped by id.
+
+### 5.3 Triggers and commands
+Trigger labels (added by me): `agent:ready` (issue → implement),
+`agent:review` (PR → work on the PR), `agent:ignore` (suppress).
+
+Commands (comment, **only honored from the repo's `assignee_login`**):
+
+```text
+/agent run      start work on the issue
+/agent review   work on the PR
+/agent stop     cancel the active task
+/agent status   report state
 ```
-                 enqueue
-   (webhook) ───────────────▶ queued
-                                │ worker picks up + acquires repo lock
-                                ▼
-                             running ──────────────┐
-                                │                   │ codex writes HITL_REQUEST.json
-        codex completes ok      │                   ▼
-                                │            awaiting_approval
-                                ▼                   │  /agent approve  → enqueue resume → running
-   commit→push→PR/comment ──▶ done                  │  /agent reject   → cancelled
-                                                    │  TTL expires     → cancelled
-   any run: nonzero/no result ─────────────────────────────▶ failed
-   /agent stop, or kill ───────────────────────────────────▶ cancelled
-   wall-clock exceeded ────────────────────────────────────▶ timed_out
-```
 
-Allowed transitions (anything else is a bug):
+(`approve`/`reject` were removed with HITL.) Webhook label triggering fires only
+on the `labeled` action; comment events trigger only via an explicit command —
+this prevents the agent's own comments (posted as me) from re-triggering runs.
 
-| From | To | Trigger |
-|------|----|---------|
-| — | queued | eligible webhook |
-| queued | running | worker dequeue + lock acquired |
-| queued | cancelled | `/agent stop` before start |
-| running | done | run outcome `completed` + push/PR ok |
-| running | awaiting_approval | run outcome `needs_approval` |
-| running | failed | run outcome `failed` |
-| running | timed_out | wall-clock kill |
-| running | cancelled | `/agent stop` |
-| awaiting_approval | running | `/agent approve` (new attempt enqueued) |
-| awaiting_approval | cancelled | `/agent reject` or TTL or `/agent stop` |
-
-Terminal states: `done`, `failed`, `cancelled`, `timed_out`.
-The partial unique index (§4) guarantees a subject has ≤1 non-terminal task.
+### 5.4 Eligibility
+A task is eligible when: repo is allowlisted + enabled; no `agent:ignore`; the
+issue/PR is **open and assigned to `assignee_login`**; a trigger label/command is
+present; and no active task already exists for that subject.
 
 ---
 
-## 6. GitHub webhook contract
+## 6. Behavior model (the core change)
 
-### 6.1 Endpoint
+**No HITL, no PRs.** The agent does whatever it needs inside the container, then:
 
-```
-POST /github/webhook
-Headers: X-GitHub-Event, X-GitHub-Delivery, X-Hub-Signature-256
-Response: 202 Accepted (always, once persisted) — processing is async.
-          400 on bad signature. 200 fast-path for ignored events.
-```
+- **Issue** (`implement`): work on a fresh branch named GitHub-style
+  `<number>-<slugified-title>` (e.g. `31-add-metadata-index`) off the default
+  branch → commit → **push the branch** → comment a summary on the issue ending
+  with “Changes pushed to `<branch>`.” **No PR is opened.**
+- **PR** (`review`): check out the PR's **own head branch**, make changes →
+  commit → **push back to that branch** (updating the PR) → comment a summary.
+  Fork PRs are detected and skipped (can't push to a fork's branch).
 
-Subscribed events: `issues`, `pull_request`, `issue_comment`,
-`pull_request_review_comment`.
-
-### 6.2 Ingestion pipeline (in `app`)
-
-```
-1. Verify X-Hub-Signature-256 (HMAC-SHA256 of raw body, GITHUB_WEBHOOK_SECRET). Fail → 400.
-2. INSERT delivery_id into github_deliveries. Conflict → 200 (duplicate, drop).
-3. Resolve repo in config/repos.yml. Not enabled → 200 (ignore).
-4. Parse intent (§6.3). No actionable intent → 200 (ignore).
-5. Resolve eligibility (§6.4). Ineligible → optionally post a one-line reason, 200.
-6. Create/transition task (§6.5) inside a tx honoring uq_one_active_task.
-7. Enqueue BullMQ job. → 202.
-```
-
-Signature verification needs the **raw** request body — register Fastify with a
-raw-body capture before JSON parsing.
-
-### 6.3 Intent parsing
-
-**Labels** (from `issues`/`pull_request` `labeled` actions or current label set):
-
-```
-agent:ready    → kind=implement
-agent:review   → kind=review
-agent:ignore   → suppress all automation for this subject
-```
-
-**Comment commands** — a comment body whose first non-empty line matches
-`^/agent\s+(run|review|stop|status|approve|reject)\b`. Only one command per
-comment; first match wins. **Commands are accepted only from the repo's
-`assignee_login`** — the single authorized commander. Comments from anyone else
-are ignored (no `operators` list in the MVP).
-
-```
-/agent run      → kind=implement, force start
-/agent review   → kind=review
-/agent stop     → cancel active task
-/agent status   → post current state (no task change)
-/agent approve  → resolve open HITL → resume
-/agent reject   → resolve open HITL → cancel
-```
-
-### 6.4 Eligibility resolution (ordered; first decisive rule wins)
-
-```
-1. Repo not enabled in config            → ignore
-2. agent:ignore present                  → ignore
-3. Comment command present:
-     - command author not authorized      → ignore (+ optional comment)
-     - approve/reject but no open HITL     → ignore (+ comment)
-     - stop/status                         → handle directly (no new task)
-     - run/review                          → candidate (kind from command)
-4. Else label present (ready/review)      → candidate (kind from label)
-5. Else                                   → ignore
-Then, for a candidate:
-   - subject must be OPEN
-   - subject must be assigned to assignee_login
-   - require_label_or_command must be satisfied (it is, by reaching here)
-   - if an active task exists for the subject:
-        run/review → ignore (+ "already running" comment)
-        (stop/approve/reject handled in step 3)
-```
-
-### 6.5 Task creation / transition
-
-- New candidate, no active task → INSERT `tasks` (`queued`), INSERT `task_runs`
-  (attempt 1), enqueue.
-- `/agent approve` on `awaiting_approval` → mark HITL `approved`, INSERT new
-  `task_runs` (attempt+1), set task `running`-bound, enqueue **resume** job.
-- `/agent reject` → mark HITL `rejected`, task → `cancelled`.
-- `/agent stop` → signal worker to kill container (§8.4), task → `cancelled`.
+The summary is exactly what Codex wrote to `AGENT_RESULT.md`; the prompts
+instruct it to write in plain developer voice and **never** mention being an AI,
+agent, assistant, or automation. No `🤖`, no "generated by" footer. Commits and
+comments are authored as me.
 
 ---
 
-## 7. Internal queue & job contract
+## 7. Data model (PostgreSQL)
 
-Single BullMQ queue `tasks`. Job payload:
-
-```ts
-type Job = {
-  taskId: number;
-  taskRunId: number;
-  mode: "implement" | "review" | "resume";
-  repoFullName: string;
-  subject: { type: "issue" | "pull_request"; number: number };
-  // resume only:
-  hitlRequestId?: number;
-  approvalNote?: string;
-};
+```text
+tasks         one unit of work per (repo, subject); partial unique index
+              enforces ≤1 active task per subject
+task_runs     one attempt per task (worktree path, container, outcome, logs)
+github_deliveries   webhook + poll-comment idempotency (delivery/comment ids)
 ```
 
-BullMQ settings: `attempts: 1` (no automatic retry — re-runs are explicit via
-HITL or operator), `removeOnComplete: false` (we keep our own state in PG),
-worker `concurrency = max_global_workers`.
+`hitl_requests` and the `hitl_state` enum were **dropped** (migration
+`1700000001000_drop_hitl.sql`). The unused enum *values* `awaiting_approval`
+(task_state) / `needs_approval` (run_outcome) are left in place (dropping enum
+values is invasive and they're inert).
+
+Task states in use: `queued → running → done | failed | cancelled | timed_out`.
 
 ---
 
-## 8. Concurrency & locking
+## 8. Worktree / git strategy (worker-owned)
 
-### 8.1 Global limit
-BullMQ worker `concurrency = config.max_global_workers` (start: 2).
+All git runs on the host (worker), never with credentials inside the runner.
 
-### 8.2 Per-repo limit
-A Redis lock per repo. Before processing, the worker attempts
-`SET lock:repo:<full_name> <taskRunId> NX EX <wall_clock+buffer>`. If it fails,
-the job is re-queued with a short backoff (it does **not** fail the task).
-Lock released in `finally`. `max_workers_per_repo` > 1 would use N lock slots;
-MVP keeps it at 1.
-
-### 8.3 Active-task uniqueness
-Enforced at the DB layer by `uq_one_active_task` (§4), independent of the lock.
-
-### 8.4 Cancellation
-`/agent stop` sets a Redis flag `cancel:task:<taskId>` and, if a container is
-running, the worker (which holds `container_name` in `task_runs`) calls
-`docker kill`. The orchestrator checks the cancel flag at each phase boundary.
-
-### 8.5 Wall-clock timeout
-Worker arms a timer for `task_wall_clock_sec`; on expiry it `docker kill`s the
-container and records outcome `timed_out`.
+- One bare mirror per repo at `/srv/agent/repos/OWNER__REPO.git`, fetched with
+  refspecs into `refs/remotes/origin/*` so `--prune` can't delete agent
+  branches.
+- Per-run worktree at `/srv/agent/worktrees/<run_id>`, created with
+  `git worktree add -B <branch> <path> <start-ref>` (idempotent across retries).
+  - implement: branch = `<n>-<slug>`, start = `refs/remotes/origin/<default>`.
+  - review: branch = the PR head ref, start = `refs/remotes/origin/<head>`.
+- The worker commits (with my identity, message from `COMMIT_MSG.md`) and pushes
+  over an ephemeral `https://oauth2:<PAT>@github.com/...` remote.
+- The bare mirror is **bind-mounted into the runner at the same host path** so
+  the worktree's `.git` gitfile resolves and git works inside the container.
 
 ---
 
-## 9. Git / worktree lifecycle (worker-owned)
+## 9. Codex execution
 
-All git runs on the **host** (worker process), never in the Codex container.
+Per task the worker launches a short-lived container:
 
-### 9.1 Mirror bootstrap (once per repo)
 ```bash
-git clone --mirror https://x-access-token:<TOKEN>@github.com/OWNER/REPO.git \
-  /srv/agent/repos/OWNER__REPO.git
-```
-`<TOKEN>` is a short-lived GitHub App **installation** token, minted per
-operation (never stored on disk; remote URL is rewritten before fetch/push).
-
-### 9.2 Per-run worktree
-```bash
-cd /srv/agent/repos/OWNER__REPO.git
-git fetch --prune origin
-# implement: branch off default branch
-git worktree add /srv/agent/worktrees/<run_id> -b agent/issue-<NN> origin/main
-# review:    check out the PR head (read-only intent)
-git worktree add /srv/agent/worktrees/<run_id> --detach origin/pull/<PR>/head
-```
-Worktrees are never reused; removed (`git worktree remove --force`) after the
-run except when the task is `awaiting_approval` (the resume attempt reuses the
-*same worktree path* so prior edits persist — this is the one intentional reuse,
-within a single task across attempts).
-
-### 9.3 Commit & push (implement mode, on `completed`)
-```bash
-cd /srv/agent/worktrees/<run_id>
-git add -A
-git -c user.name="<bot>" -c user.email="<bot>@users.noreply.github.com" \
-    commit -F /srv/agent/runs/<run_id>/COMMIT_MSG.md   # authored by Codex (§10)
-git push https://x-access-token:<TOKEN>@github.com/OWNER/REPO.git HEAD:agent/issue-<NN>
-```
-Then open/update the PR (§12). **The agent never merges and never pushes to a
-PR's own branch in review mode.**
-
----
-
-## 10. Codex runner I/O contract
-
-### 10.1 Container invocation
-```bash
-docker run --rm \
-  --name codex-task-<run_id> \
-  --network <egress-only>           \  # see §14
-  --cpus=2 --memory=4g \
-  -v /srv/agent/worktrees/<run_id>:/workspace \
-  -v /srv/agent/codex-home:/home/codex/.codex:ro \
-  -v /srv/agent/runs/<run_id>:/run-output \
-  -w /workspace \
+docker run --rm --cpus=2 --memory=4g \
+  --cap-drop ALL --security-opt no-new-privileges \
+  -v <worktree>:/workspace:rw \
+  -v <run-dir>/codex-home:/home/codex/.codex:rw \   # private per-run copy of auth
+  -v <run-dir>:/run-output:rw \
+  -v <mirror>:<mirror>:rw \                          # so git resolves
   -e CODEX_HOME=/home/codex/.codex \
-  codex-runner:latest \
-  bash -lc 'codex exec --json --sandbox workspace-write --ask-for-approval never - \
+  kotx-runner \
+  bash -lc 'codex exec --json --ephemeral \
+            --dangerously-bypass-approvals-and-sandbox - \
             < /run-output/TASK.md > /run-output/codex.jsonl 2>&1'
 ```
 
-**Flag rationale (verify exact spellings against the pinned CLI version — §16 Q6):**
+Key decisions, all forced by reality during bring-up:
 
-- `exec` — non-interactive headless mode; runs to completion, no TUI.
-- prompt via `-` / stdin — `codex exec` normally takes the prompt as a positional
-  arg. If `-`-means-stdin is unsupported by the installed version, fall back to
-  `codex exec "$(cat /run-output/TASK.md)"`. **Pin this in `runner/Dockerfile`.**
-- `--json` — JSONL event stream → `codex.jsonl` (observability only; control flow
-  keys off output files, not this stream — § D6).
-- `--sandbox workspace-write` — OS sandbox for **shell commands the model runs**
-  (not Codex's own API connection). **Network is disabled inside this sandbox**,
-  so commands needing network (e.g. `npm install`) fail. This is *why* GitHub CI is
-  the source of truth and `TASK.md` instructs Codex to run only local checks where
-  deps already exist.
-- `--ask-for-approval never` — **critical for headless operation.** Without it,
-  Codex's *own* approval policy can block waiting for an interactive approval that
-  never arrives, hanging the container until the wall-clock kill. We deliberately
-  bypass Codex's built-in approvals: risky actions are surfaced through *our* HITL
-  protocol (`HITL_REQUEST.json`, §11), not Codex's prompts. (`--full-auto` bundles
-  sandbox + auto-approval and is an acceptable equivalent if preferred.)
+- **The container is the sandbox.** Codex's own bwrap sandbox can't create a user
+  namespace inside the (capability-dropped) container, so we
+  `--dangerously-bypass-approvals-and-sandbox` and rely on the container for
+  isolation: caps dropped, no-new-privileges, **no Docker socket**, no host
+  creds, only the four mounts above. Consequence: Codex's shell has network
+  (bridge) and runs as root — which is what lets it install deps.
+- **Writable per-run `CODEX_HOME`.** Codex must write to `CODEX_HOME` at startup
+  (app-server, PATH aliases) and to refresh tokens, so each run gets its own
+  copy of `auth.json`/`config.toml` mounted rw (no cross-run races).
+- **`--ephemeral`** so session files aren't persisted.
+- **Toolchain in `kotx-runner`:** Node 20 + npm (base), Python 3 + pip + venv +
+  `python-is-python3`, and `uv`. Codex installs anything else at runtime
+  (`uv`/`pip`/`npm`/`apt-get`).
+- Runner runs as **root** (so it can write the root-owned worktree/run mounts and
+  read the auth). Verified Codex flags against `codex exec --help` 0.142.4.
 
-### 10.2 Inputs (written by worker into `/run-output` before launch)
-- `TASK.md` — rendered from `prompts/implement.md.hbs`, `review.md.hbs`, or
-  `resume.md.hbs`. Contains: subject title/body, the Definition of Done (§ plan),
-  review-mode rules, and for resume the approval decision + note.
-
-### 10.3 Outputs (read by worker after the container exits)
-| File | Meaning |
-|------|---------|
-| `codex.jsonl` | full event stream (always kept for observability) |
-| `AGENT_RESULT.md` | required on success: summary, changed files, reasoning, tests considered/run, CI expectations, risks, follow-ups |
-| `COMMIT_MSG.md` | Codex's suggested commit message (implement mode) |
-| `REVIEW.md` | the structured review (review mode) |
-| `HITL_REQUEST.json` | present iff Codex needs approval (schema §11) |
-
-### 10.4 Outcome classification (worker)
-```
-HITL_REQUEST.json present                      → needs_approval
-no HITL + exit 0 + AGENT_RESULT.md present      → completed
-killed by timeout                               → timed_out
-killed by cancel                                → cancelled
-otherwise                                       → failed
-```
-Output files are authoritative; exit code only breaks ties (§ D6).
+Outcome classification (output files are authoritative; exit code breaks ties):
+`AGENT_RESULT.md` present + exit 0 → `completed`; cancel/timeout kills →
+`cancelled`/`timed_out`; else `failed`.
 
 ---
 
-## 11. HITL protocol
+## 10. Deployment (Hetzner + Docker + CI)
 
-### 11.1 `HITL_REQUEST.json` schema (written by Codex)
-```json
-{
-  "reason": "string, why approval is needed",
-  "proposed_action": "string, the exact action to be taken",
-  "risk": "low | medium | high",
-  "alternatives": ["string", "..."]
-}
-```
-Risky categories that MUST trigger this (instructed in TASK.md): DB migrations,
-auth/security changes, major dependency upgrades, infra changes, secret handling,
-destructive commands, broad refactors, force-push, deployment.
-
-### 11.2 Worker handling on `needs_approval`
-```
-1. Validate JSON against schema; invalid → outcome failed.
-2. INSERT hitl_requests (open).
-3. Post a GitHub comment rendering reason/action/risk/alternatives + how to
-   respond (/agent approve | /agent reject). Store comment_id.
-4. Task → awaiting_approval. Keep the worktree. Release repo lock.
-5. Arm awaiting_approval_ttl_sec timer → on expiry, HITL expired + task cancelled.
-```
-
-### 11.3 Resume on `/agent approve`
-```
-1. hitl_requests → approved (decided_by, decided_at).
-2. New task_runs (attempt+1), SAME worktree_path.
-3. Enqueue mode=resume with approvalNote.
-4. resume.md.hbs prompt: "A prior step requested approval for <action>.
-   Decision: APPROVED. Note: <note>. The workspace already contains your earlier
-   changes. Continue from there and finish per the Definition of Done."
-```
-**[DEVIATION]** This is a fresh `codex exec`, not a suspended session (§ D3).
-Faithful session-resume via `codex exec resume <session_id>` is deferred (§16).
+- Single VPS (Ubuntu), Docker + Compose. Codex CLI logged in **on the host**
+  once; auth copied/seeded into `CODEX_HOME`, then copied per-run into runners.
+- **CI** (`.github/workflows/build-images.yml`) builds + pushes `kotx-app` and
+  `kotx-runner` to GHCR on push to `main` / `v*` tags. `kotx-runner` pins the
+  Codex CLI version and `uv` version.
+- Compose pulls `kotx-app` for app/worker; the worker **auto-pulls
+  `kotx-runner`** if missing (won't replace an existing `:latest` — `docker pull`
+  to refresh after a new build).
+- `config/` and `prompts/` are bind-mounted from the cloned repo, so editing
+  `repos.yml` or prompts needs only a `docker compose up -d` (restart the worker
+  to clear its compiled-prompt cache), not an image rebuild.
+- **Migrations are NOT in image-build CI** (it can't reach the VPS DB). The
+  `migrate` compose service applies them on every deploy, before app/worker.
 
 ---
 
-## 12. GitHub outputs
+## 11. Configuration
 
-### 12.1 Implement → PR (open or update)
-PR body template:
-```
-## Summary
-## Changed files
-## Reasoning
-## Tests considered
-## Tests run (if any)
-## CI expectations
-## Risks
-## Follow-up work
----
-🤖 Generated by the Codex agent · run #<task_run_id> · do not auto-merge
-```
-- New branch with no PR → create PR, base = default branch, link issue
-  (`Closes #<NN>` when appropriate).
-- Existing agent PR → push new commits; update PR body; post a short "updated"
-  comment.
-
-### 12.2 Review → comment only
-Post `REVIEW.md` as a single issue/PR comment. Sections per the plan's review
-template, ending with a clear recommendation: **approve / request changes /
-comment only**. No code changes, no branch, no push.
-
-### 12.3 Status / errors
-`/agent status` → comment with task state, attempt, branch/PR links.
-`failed`/`timed_out` → comment with a short reason + pointer to retained logs
-(no internal paths leaked; reference run id).
+- `config/defaults.yml` — concurrency, timeouts, container limits, codex flags
+  (`approval_policy` retained but the runner currently bypasses sandbox/approval).
+- `config/repos.yml` — operator-owned allowlist; per repo: `enabled`,
+  `default_branch`, `assignee_login`, `poll`. Never read from a target repo.
+- `.env` — PAT, webhook secret, commit identity, image refs, GHCR pull creds,
+  paths, poll interval. The `allow_infra_changes`/`allow_secret_access` flags
+  exist in schema but are **not enforced** (HITL gating was removed); treat as
+  documentation only.
 
 ---
 
-## 13. Codex auth (host-managed)
+## 12. Security model
 
-```bash
-# one-time, interactive, on the VPS:
-export CODEX_HOME=/srv/agent/codex-home
-codex login --device-auth
-```
-**Pre-flight refresh** (worker, before each container launch): inspect token
-expiry in `$CODEX_HOME`; if it expires within `auth_refresh_skew_sec`, run the
-host-side refresh, serialized under a Redis lock `lock:codex-auth` so concurrent
-workers don't race. Containers always mount `$CODEX_HOME` **read-only**
-(§ D4). No `OPENAI_API_KEY`/API-key env vars in any container.
-
----
-
-## 14. Security model
-
-Mounted into `codex-runner` (and nothing else):
-```
-/workspace          (the task worktree, read-write)
-/home/codex/.codex  (Codex auth, READ-ONLY)
-/run-output         (task output dir, read-write)
-```
-Never mounted into `codex-runner`: host home, SSH keys, prod secrets, cloud
-creds, **the Docker socket**, the bare mirror, GitHub tokens.
-
-- Network: Codex container gets **egress only** to what Codex needs (OpenAI/Codex
-  endpoints). No inbound. No git remotes reachable (git is worker-side anyway).
-  MVP may start with unrestricted egress + no creds; tighten to an allowlist
-  later (§16).
-- GitHub tokens: short-lived installation tokens minted per operation, injected
-  into remote URLs by the worker, never written to disk or into a container.
-- Invariants (not configurable anywhere): no auto-merge, no auto-deploy, no
-  pushing to a non-agent branch, no force-push without an approved HITL.
-- Webhook auth: HMAC signature required; deliveries de-duped by id.
+- The runner is the isolation boundary: dropped caps, no-new-privileges, no
+  Docker socket, no host creds, only worktree + per-run auth + run-dir + mirror
+  mounted; destroyed after each task.
+- Git creds never enter the runner — the worker pushes from the host with an
+  ephemeral tokenized remote.
+- PAT should be fine-grained and scoped to the allowlisted repos (a classic
+  `repo` token can reach all your repos; the allowlist only gates *behavior*).
+- Invariants: never opens PRs, never merges, never deploys, never force-pushes
+  without intent. Open trade-off: bypassing Codex's sandbox means its shell has
+  network + root *inside the container* (see §2.2).
 
 ---
 
-## 15. MVP milestones (mapped to this spec)
+## 13. Changelog vs the original design
 
-| Milestone | Delivers | Spec refs |
-|-----------|----------|-----------|
-| M1 Webhook receiver | `app`, signature verify, dedup, config, intent+eligibility, task rows, enqueue | §3,§4,§6,§7 |
-| M2 Single worker | worktree, TASK.md render, run container, capture JSONL, classify, commit+push, open PR / post review | §9,§10,§12 |
-| M3 Concurrency | BullMQ concurrency, repo lock, cancel flag, wall-clock timeout | §7,§8 |
-| M4 HITL | parse HITL_REQUEST.json, post approval comment, approve/reject/TTL, resume re-run | §11 |
-| M5 Hardening | log retention, per-repo overrides, failure recovery, richer PR/review bodies, observability | §3,§12 |
-
----
-
-## 16. Open questions for you
-
-1. ~~**Authorized commanders.**~~ **RESOLVED: assignee only.** No `operators`
-   list in the MVP — commands are honored solely from the repo's `assignee_login`
-   (§6.3). Everyone else's `/agent …` comments are ignored.
-2. **Issue → PR linking.** Always `Closes #NN` (auto-close on merge), or just
-   reference `#NN`? Default: `Closes`.
-3. **Egress lockdown timing.** Start with unrestricted container egress (no
-   creds mounted) and tighten to an endpoint allowlist in M5, or lock it down in
-   M2? Default: unrestricted-but-credless first, tighten in M5.
-4. **Faithful session resume.** Is stateless HITL resume (§ D3) acceptable for
-   the MVP, with `codex exec resume <session_id>` as a later upgrade? Default:
-   yes, stateless for MVP.
-5. **Review-mode checkout depth.** Detached `origin/pull/<PR>/head` is enough for
-   a diff review; do you also want the PR's base merge so Codex sees the merged
-   result? Default: head only.
-6. **`codex exec` flags (verification task, not a design choice).** On the VPS,
-   run `codex exec --help` against the pinned CLI version and confirm: (a) `--json`
-   exists and emits JSONL; (b) `--sandbox workspace-write` exists and its
-   network-off behavior; (c) `--ask-for-approval never` (or `--full-auto`) exists
-   and prevents interactive blocking; (d) how the prompt is supplied — positional
-   arg vs. stdin via `-`. Record the exact, working command in
-   `runner/Dockerfile`. See §10.1 for the rationale behind each flag.
+| Area | Original | Now |
+|------|----------|-----|
+| GitHub auth | private GitHub App + installation tokens | personal PAT (acts as me) |
+| Input | webhooks only | webhooks **and** per-repo polling |
+| HITL | stop + `HITL_REQUEST.json` + approve/reject + resume | **removed**; agent runs autonomously |
+| Output | open/update PR + structured review | push branch + plain summary comment; **no PR** |
+| Review mode | read-only review comment | **work on the PR's branch** + push |
+| Branch | `agent/issue-N` | GitHub-style `<n>-<slug>` (issues); PR head (PRs) |
+| Voice | `🤖`/"generated by agent" | plain, never identifies as an agent |
+| Codex sandbox | `--sandbox workspace-write` + approval policy | `--dangerously-bypass-approvals-and-sandbox` (container is the sandbox) |
+| CODEX_HOME | read-only shared mount | private writable per-run copy |
+| Runner image | Node only | Node + Python + uv; runs as root; pulls more at runtime |
+| Images | built on the VPS | CI → GHCR; compose pulls; auto-migrate |
+| Commands | run/review/stop/status/approve/reject | run/review/stop/status |
 ```

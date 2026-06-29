@@ -16,7 +16,7 @@ export interface Normalized {
   repoFullName: string;
   senderLogin: string;
   subject: NormalizedSubject | null;
-  comment?: { body: string; authorLogin: string };
+  comment?: { body: string; authorLogin: string; htmlUrl: string };
 }
 
 // The webhook payloads are loosely typed; we read only the fields we need.
@@ -86,6 +86,7 @@ export function normalize(event: string, payload: any): Normalized | null {
         comment: {
           body: payload.comment?.body ?? "",
           authorLogin: payload.comment?.user?.login ?? "",
+          htmlUrl: payload.comment?.html_url ?? "",
         },
       };
     case "pull_request_review_comment":
@@ -99,6 +100,7 @@ export function normalize(event: string, payload: any): Normalized | null {
         comment: {
           body: payload.comment?.body ?? "",
           authorLogin: payload.comment?.user?.login ?? "",
+          htmlUrl: payload.comment?.html_url ?? "",
         },
       };
     default:

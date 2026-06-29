@@ -99,21 +99,47 @@ export async function commitAll(
   return true;
 }
 
-/** Push the agent branch to GitHub over an ephemeral authed HTTPS remote. */
+async function resolveRef(mirror: string, ref: string): Promise<string | null> {
+  try {
+    const { stdout } = await run("git", [
+      "-C",
+      mirror,
+      "rev-parse",
+      "--verify",
+      `${ref}^{commit}`,
+    ]);
+    return stdout.trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Push the branch to GitHub over an ephemeral authed HTTPS remote.
+ *
+ * For worker-owned issue branches, `forceWithLease` lets a rerun replace the
+ * previous attempt while still refusing to overwrite a branch that moved after
+ * this job fetched it.
+ */
 export async function pushBranch(
   repoFullName: string,
   branchName: string,
   token: string,
+  opts: { forceWithLease?: boolean } = {},
 ): Promise<void> {
   const mirror = mirrorPath(repoFullName);
   const url = authedRemote(repoFullName, token);
-  await run("git", [
-    "-C",
-    mirror,
-    "push",
-    url,
-    `refs/heads/${branchName}:refs/heads/${branchName}`,
-  ]);
+  const remoteRef = `refs/heads/${branchName}`;
+  const args = ["-C", mirror, "push"];
+
+  if (opts.forceWithLease) {
+    const expected =
+      (await resolveRef(mirror, `refs/remotes/origin/${branchName}`)) ?? "";
+    args.push(`--force-with-lease=${remoteRef}:${expected}`);
+  }
+
+  args.push(url, `${remoteRef}:${remoteRef}`);
+  await run("git", args);
 }
 
 export async function removeWorktree(

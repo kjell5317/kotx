@@ -37,6 +37,7 @@ export interface Task {
   branch_name: string | null;
   pr_number: number | null;
   triggered_by: string;
+  trigger_comment_url: string | null;
   created_at: Date;
   updated_at: Date;
 }

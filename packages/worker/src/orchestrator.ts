@@ -37,12 +37,34 @@ import {
   postFailureComment,
   postSummary,
 } from "./githubOutputs.js";
+import { notify } from "./notify.js";
 import { classifyOutcome, deleteArtifacts, readArtifacts } from "./outputs.js";
 import { containerName, killContainer, runCodexContainer } from "./runner.js";
 import { renderTaskMd } from "./templates.js";
 
 const RETRY_DELAY_MS = 5000;
 const CANCEL_POLL_MS = 3000;
+
+function subjectLabel(task: Task): string {
+  const kind = task.subject_type === "pull_request" ? "PR" : "Issue";
+  return `${kind} #${task.subject_number}`;
+}
+
+/** Where a notification should deep-link: the triggering comment on a PR if we
+ *  have it, otherwise the issue/PR itself. */
+function notifyUrl(task: Task): string {
+  if (task.subject_type === "pull_request" && task.trigger_comment_url)
+    return task.trigger_comment_url;
+  const kind = task.subject_type === "pull_request" ? "pull" : "issues";
+  return `https://github.com/${task.repo_full_name}/${kind}/${task.subject_number}`;
+}
+
+const OUTCOME_WORD: Record<string, string> = {
+  done: "completed",
+  failed: "failed",
+  timed_out: "timed out",
+  cancelled: "cancelled",
+};
 
 interface Guarded {
   exitCode: number;
@@ -128,6 +150,7 @@ export async function processJob(job: TaskJob): Promise<void> {
   const runOutputDir = join(env.agentDataDir, "runs", String(run.id));
   const isReview = task.kind === "review";
   const name = containerName(run.id);
+  let started = false;
 
   try {
     if (await isCancelled(task.id)) {
@@ -138,6 +161,13 @@ export async function processJob(job: TaskJob): Promise<void> {
     await setTaskState(task.id, "running");
     await markRunStarted(run.id, name, join(runOutputDir, "codex.jsonl"));
     await mkdir(runOutputDir, { recursive: true });
+    await notify({
+      title: `${subjectLabel(task)} started`,
+      message: task.repo_full_name,
+      tag: `kotx-task-${task.id}`,
+      url: notifyUrl(task),
+    });
+    started = true;
 
     const octokit = getOctokit();
     const subject = await fetchSubject(
@@ -234,7 +264,11 @@ export async function processJob(job: TaskJob): Promise<void> {
       );
       await deleteArtifacts(worktreePath);
       const committed = await commitAll(worktreePath, msgFile);
-      if (committed) await pushBranch(task.repo_full_name, branch, gitToken());
+      if (committed) {
+        await pushBranch(task.repo_full_name, branch, gitToken(), {
+          forceWithLease: task.subject_type === "issue",
+        });
+      }
 
       const summary = artifacts.resultMd ?? "Done.";
       const body =
@@ -268,6 +302,16 @@ export async function processJob(job: TaskJob): Promise<void> {
     await setTaskState(task.id, "failed").catch(() => {});
     await removeWorktree(task.repo_full_name, worktreePath).catch(() => {});
   } finally {
+    if (started) {
+      const fresh = await getTask(task.id).catch(() => undefined);
+      const state = fresh?.state ?? "failed";
+      await notify({
+        title: `${subjectLabel(task)} ${OUTCOME_WORD[state] ?? state}`,
+        message: task.repo_full_name,
+        tag: `kotx-task-${task.id}`,
+        url: notifyUrl(task),
+      }).catch(() => {});
+    }
     await releaseRepoLock(task.repo_full_name, holderId).catch(() => {});
     await clearCancelFlag(task.id).catch(() => {});
   }

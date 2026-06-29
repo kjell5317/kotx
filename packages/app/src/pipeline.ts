@@ -62,7 +62,8 @@ export async function ingest(n: Normalized): Promise<IngestResult> {
   const labelIntent = intentFromLabels(subject.labels);
   if (!labelIntent || !labelIntent.kind)
     return { status: "ignored", reason: "no-trigger-label" };
-  return startCandidate(repo, subject, labelIntent.kind, n.senderLogin);
+  // label-triggered: no triggering comment to link to
+  return startCandidate(repo, subject, labelIntent.kind, n.senderLogin, null);
 }
 
 async function handleCommand(
@@ -75,7 +76,13 @@ async function handleCommand(
   switch (command) {
     case "run":
     case "review":
-      return startCandidate(repo, subject, kindFromCommand(command)!, by);
+      return startCandidate(
+        repo,
+        subject,
+        kindFromCommand(command)!,
+        by,
+        n.comment!.htmlUrl || null,
+      );
     case "stop":
       return handleStop(repo, subject);
     case "status":
@@ -90,6 +97,7 @@ async function startCandidate(
   subject: NormalizedSubject,
   kind: TaskKind,
   triggeredBy: string,
+  triggerCommentUrl: string | null,
 ): Promise<IngestResult> {
   if (subject.state !== "open")
     return { status: "ignored", reason: "subject-closed" };
@@ -119,6 +127,7 @@ async function startCandidate(
     kind,
     branchName: null,
     triggeredBy,
+    triggerCommentUrl,
     dataDir: loadEnv().agentDataDir,
   });
   if (!created) return { status: "ignored", reason: "already-active-race" };
