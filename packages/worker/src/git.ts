@@ -31,7 +31,12 @@ export async function ensureMirrorFetched(
   return mirror;
 }
 
-/** Create a fresh worktree on a new agent branch off the base branch. */
+/**
+ * Create a fresh worktree on the agent branch off the base branch. Uses `-B`
+ * (create-or-reset) so a leftover branch from a previous failed attempt doesn't
+ * block the run, and prunes stale worktree admin entries first. An implement
+ * attempt always starts fresh from base, so resetting the branch is correct.
+ */
 export async function addImplementWorktree(
   repoFullName: string,
   worktreePath: string,
@@ -39,12 +44,13 @@ export async function addImplementWorktree(
   baseBranch: string,
 ): Promise<void> {
   const mirror = mirrorPath(repoFullName);
+  await run("git", ["-C", mirror, "worktree", "prune"]);
   await run("git", [
     "-C",
     mirror,
     "worktree",
     "add",
-    "-b",
+    "-B",
     branchName,
     worktreePath,
     `refs/remotes/origin/${baseBranch}`,
