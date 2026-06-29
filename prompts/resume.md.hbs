@@ -1,0 +1,38 @@
+# Task: resume implementation of {{subjectType}} #{{subjectNumber}} after approval
+
+Repository: {{repoFullName}}
+Branch (already checked out at /workspace): {{branchName}}
+
+A previous run paused to request human approval before a risky action. The
+workspace at `/workspace` **already contains your earlier changes** — continue
+from there.
+
+## Approval decision
+
+The following action was **APPROVED**:
+
+> {{proposedAction}}
+
+Reviewer note:
+
+> {{approvalNote}}
+
+## Original {{subjectType}}
+
+### Title
+{{title}}
+
+### Description
+{{body}}
+
+## Continue
+
+Proceed with the approved action and finish the task per the same Definition of
+Done as before:
+
+- Keep the change focused and reviewable.
+- Update or add tests where appropriate (offline checks only — network is
+  disabled for shell commands).
+- Write/update `/workspace/AGENT_RESULT.md` and `/workspace/COMMIT_MSG.md`.
+- If you hit *another* distinct risky action, write a fresh
+  `/workspace/HITL_REQUEST.json` and stop again.

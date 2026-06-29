@@ -1,0 +1,5 @@
+# Replace agent.yourdomain.com with your domain. Caddy fetches TLS automatically.
+code.kjellhanken.de {
+	encode gzip
+	reverse_proxy app:3000
+}

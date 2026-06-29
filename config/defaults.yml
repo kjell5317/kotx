@@ -1,0 +1,28 @@
+# Global defaults. Per-repo overrides live in repos.yml.
+# auto_merge / auto_deploy are INVARIANTS — not overridable anywhere (see SPEC §14).
+concurrency:
+  max_global_workers: 2
+  max_workers_per_repo: 2
+
+timeouts:
+  task_wall_clock_sec: 1800 # hard kill of a codex-runner container
+  awaiting_approval_ttl_sec: 172800 # 48h, then auto-cancel the HITL + task
+  repo_lock_buffer_sec: 120 # lock TTL = wall_clock + buffer
+
+container:
+  cpus: 2
+  memory: "4g"
+  image: "codex-runner:latest"
+  # Egress-only network for the runner. "bridge" = unrestricted egress, no creds
+  # mounted (MVP default). Swap for a locked-down network in M5 (SPEC §14).
+  network: "bridge"
+
+codex:
+  sandbox: "workspace-write"
+  ask_for_approval: "never"
+  auth_refresh_skew_sec: 600 # refresh token if it expires within 10 min
+
+policy:
+  auto_merge: false # INVARIANT
+  auto_deploy: false # INVARIANT
+  require_label_or_command: false

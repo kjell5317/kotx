@@ -1,0 +1,26 @@
+# codex-runner: short-lived container that executes one Codex task.
+# Holds NO credentials of its own — CODEX_HOME is bind-mounted read-only at run
+# time and the worktree is bind-mounted at /workspace (SPEC §10/§14).
+FROM node:20-bookworm-slim
+
+# git is handy for diffs inside the sandbox; bash for the entrypoint.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git ca-certificates bash \
+  && rm -rf /var/lib/apt/lists/*
+
+# Install the Codex CLI. PIN the version and CONFIRM the exec flags
+# (--json / --sandbox / --ask-for-approval, stdin via '-') against this version
+# — see SPEC §16 Q6. Adjust the package/name to your distribution channel.
+ARG CODEX_VERSION=latest
+RUN npm install -g @openai/codex@${CODEX_VERSION} \
+  && codex --version
+
+# Unprivileged user; CODEX_HOME mount target lives under its home.
+RUN useradd -m -u 1001 codex
+USER codex
+ENV CODEX_HOME=/home/codex/.codex
+WORKDIR /workspace
+
+# The worker overrides CMD with the actual `codex exec …` invocation, but this
+# documents the expected shape.
+CMD ["bash", "-lc", "codex exec --json --sandbox workspace-write --ask-for-approval never - < /run-output/TASK.md > /run-output/codex.jsonl 2>&1"]

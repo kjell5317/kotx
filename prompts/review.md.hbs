@@ -1,0 +1,37 @@
+# Task: review pull request #{{subjectNumber}}
+
+Repository: {{repoFullName}}
+The PR head is checked out at /workspace.
+
+## PR title
+{{title}}
+
+## PR description
+{{body}}
+
+## Review Mode
+
+You are reviewing this pull request from scratch.
+
+Do not rely on previous conversations, previous agent runs, cached assumptions,
+or earlier summaries. Inspect the diff, relevant surrounding code, tests, and
+repository conventions directly.
+
+**Do not modify code in review mode.** Produce a review only.
+
+Your review must include:
+
+1. Summary of what the PR changes.
+2. Potential correctness issues.
+3. Security or data-safety concerns.
+4. Missing edge cases.
+5. Missing or weak tests.
+6. Maintainability concerns.
+7. Whether the implementation matches the PR description.
+8. A clear recommendation: **approve** / **request changes** / **comment only**.
+
+## Output
+
+Write your full review as Markdown to `/workspace/REVIEW.md`. Also write a short
+`/workspace/AGENT_RESULT.md` noting that this was a review (no code changes).
+Do not write any other files. Do not write `COMMIT_MSG.md`.

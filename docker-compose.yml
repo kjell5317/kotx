@@ -1,0 +1,78 @@
+services:
+  proxy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["node", "packages/app/dist/index.js"]
+    env_file: .env
+    environment:
+      CONFIG_DIR: /app/config
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["node", "packages/worker/dist/index.js"]
+    env_file: .env
+    environment:
+      CONFIG_DIR: /app/config
+      PROMPTS_DIR: /app/prompts
+    volumes:
+      # the worker drives Docker directly (dockerode) — socket mounted HERE ONLY,
+      # never into a codex-runner container (SPEC §14).
+      - /var/run/docker.sock:/var/run/docker.sock
+      # host data dirs must be visible at identical paths so bind mounts the
+      # worker hands to codex-runner resolve on the host daemon.
+      - ${AGENT_DATA_DIR:-/srv/agent}:${AGENT_DATA_DIR:-/srv/agent}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kotx
+      POSTGRES_PASSWORD: kotx
+      POSTGRES_DB: kotx
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kotx"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+
+volumes:
+  caddy_data:
+  caddy_config:
+  pg_data:
+  redis_data:

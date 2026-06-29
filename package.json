@@ -1,0 +1,32 @@
+{
+  "name": "kotx",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal concurrent Codex coding agent on Hetzner (see SPEC.md)",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "packages/shared",
+    "packages/app",
+    "packages/worker"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "typecheck": "tsc --build --pretty",
+    "clean": "tsc --build --clean",
+    "dev:app": "tsx watch packages/app/src/index.ts",
+    "dev:worker": "tsx watch packages/worker/src/index.ts",
+    "start:app": "node packages/app/dist/index.js",
+    "start:worker": "node packages/worker/dist/index.js",
+    "migrate:up": "node-pg-migrate up -m migrations -j sql",
+    "migrate:down": "node-pg-migrate down -m migrations -j sql"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "node-pg-migrate": "^7.9.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

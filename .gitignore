@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.local
+*.log
+
+# host data dirs (should live under /srv/agent in prod, never committed)
+/srv/
+runs/
+worktrees/
+repos/

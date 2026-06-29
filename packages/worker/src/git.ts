@@ -1,0 +1,133 @@
+import { existsSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { authedRemote, loadEnv, splitRepo } from "@kotx/shared";
+import { run } from "./exec.js";
+
+const HEADS = "+refs/heads/*:refs/remotes/origin/*";
+const PULLS = "+refs/pull/*/head:refs/remotes/origin/pull/*";
+
+export function mirrorPath(repoFullName: string): string {
+  const [owner, repo] = splitRepo(repoFullName);
+  return join(loadEnv().agentDataDir, "repos", `${owner}__${repo}.git`);
+}
+
+/**
+ * Ensure a bare mirror exists, then fetch all heads + PR heads into the
+ * `refs/remotes/origin/*` namespace. Agent branches live in `refs/heads/*` and
+ * are therefore safe from `--prune` (SPEC §9.1).
+ */
+export async function ensureMirrorFetched(
+  repoFullName: string,
+  token: string,
+): Promise<string> {
+  const mirror = mirrorPath(repoFullName);
+  if (!existsSync(join(mirror, "HEAD"))) {
+    await mkdir(mirror, { recursive: true });
+    await run("git", ["init", "--bare", mirror]);
+  }
+  const url = authedRemote(repoFullName, token);
+  await run("git", ["-C", mirror, "fetch", "--prune", url, HEADS, PULLS]);
+  return mirror;
+}
+
+/** Create a fresh worktree on a new agent branch off the base branch. */
+export async function addImplementWorktree(
+  repoFullName: string,
+  worktreePath: string,
+  branchName: string,
+  baseBranch: string,
+): Promise<void> {
+  const mirror = mirrorPath(repoFullName);
+  await run("git", [
+    "-C",
+    mirror,
+    "worktree",
+    "add",
+    "-b",
+    branchName,
+    worktreePath,
+    `refs/remotes/origin/${baseBranch}`,
+  ]);
+}
+
+/** Create a detached worktree at a PR head (review mode). */
+export async function addReviewWorktree(
+  repoFullName: string,
+  worktreePath: string,
+  prNumber: number,
+): Promise<void> {
+  const mirror = mirrorPath(repoFullName);
+  await run("git", [
+    "-C",
+    mirror,
+    "worktree",
+    "add",
+    "--detach",
+    worktreePath,
+    `refs/remotes/origin/pull/${prNumber}`,
+  ]);
+}
+
+/** Stage everything and commit. Returns false if there was nothing to commit. */
+export async function commitAll(
+  worktreePath: string,
+  commitMsgFile: string,
+): Promise<boolean> {
+  const env = loadEnv();
+  await run("git", ["-C", worktreePath, "add", "-A"]);
+  const { stdout } = await run("git", [
+    "-C",
+    worktreePath,
+    "status",
+    "--porcelain",
+  ]);
+  if (stdout.trim() === "") return false;
+  await run("git", [
+    "-C",
+    worktreePath,
+    "-c",
+    `user.name=${env.github.committerName}`,
+    "-c",
+    `user.email=${env.github.committerEmail}`,
+    "commit",
+    "-F",
+    commitMsgFile,
+  ]);
+  return true;
+}
+
+/** Push the agent branch to GitHub over an ephemeral authed HTTPS remote. */
+export async function pushBranch(
+  repoFullName: string,
+  branchName: string,
+  token: string,
+): Promise<void> {
+  const mirror = mirrorPath(repoFullName);
+  const url = authedRemote(repoFullName, token);
+  await run("git", [
+    "-C",
+    mirror,
+    "push",
+    url,
+    `refs/heads/${branchName}:refs/heads/${branchName}`,
+  ]);
+}
+
+export async function removeWorktree(
+  repoFullName: string,
+  worktreePath: string,
+): Promise<void> {
+  const mirror = mirrorPath(repoFullName);
+  if (!existsSync(worktreePath)) return;
+  await run("git", [
+    "-C",
+    mirror,
+    "worktree",
+    "remove",
+    "--force",
+    worktreePath,
+  ]).catch(() => {
+    /* best-effort cleanup */
+  });
+}
