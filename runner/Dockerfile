@@ -8,9 +8,9 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends git ca-certificates bash \
   && rm -rf /var/lib/apt/lists/*
 
-# Install the Codex CLI. PIN the version and CONFIRM the exec flags
-# (--json / --sandbox / --ask-for-approval, stdin via '-') against this version
-# — see SPEC §16 Q6. Adjust the package/name to your distribution channel.
+# Install the Codex CLI. PIN the version. Verified against `codex exec --help`:
+# --json (JSONL), -s/--sandbox, prompt via '-' (stdin). NOTE: exec has NO
+# --ask-for-approval flag — approval policy is set via `-c approval_policy=...`.
 ARG CODEX_VERSION=latest
 RUN npm install -g @openai/codex@${CODEX_VERSION} \
   && codex --version
@@ -23,4 +23,4 @@ WORKDIR /workspace
 
 # The worker overrides CMD with the actual `codex exec …` invocation, but this
 # documents the expected shape.
-CMD ["bash", "-lc", "codex exec --json --sandbox workspace-write --ask-for-approval never - < /run-output/TASK.md > /run-output/codex.jsonl 2>&1"]
+CMD ["bash", "-lc", "codex exec --json --sandbox workspace-write -c approval_policy=never - < /run-output/TASK.md > /run-output/codex.jsonl 2>&1"]

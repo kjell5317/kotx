@@ -19,7 +19,8 @@ export const defaultsSchema = z.object({
   }),
   codex: z.object({
     sandbox: z.string(),
-    ask_for_approval: z.string(),
+    // maps to `-c approval_policy=<value>`; values: untrusted|on-failure|on-request|never
+    approval_policy: z.string(),
     auth_refresh_skew_sec: z.number().int().nonnegative(),
   }),
   policy: z.object({

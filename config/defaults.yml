@@ -19,7 +19,7 @@ container:
 
 codex:
   sandbox: "workspace-write"
-  ask_for_approval: "never"
+  approval_policy: "never" # -c approval_policy=<value>; never = run in-sandbox, no prompts
   auth_refresh_skew_sec: 600 # refresh token if it expires within 10 min
 
 policy:

@@ -44,7 +44,8 @@ export async function runCodexContainer(opts: {
     "exec",
     "--json",
     `--sandbox ${codex.sandbox}`,
-    `--ask-for-approval ${codex.ask_for_approval}`,
+    // approval policy is a config value in exec mode (no --ask-for-approval flag)
+    `-c approval_policy=${codex.approval_policy}`,
     "-",
     "< /run-output/TASK.md",
     "> /run-output/codex.jsonl 2>&1",
