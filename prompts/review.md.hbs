@@ -9,6 +9,18 @@ PR branch (already checked out at /workspace): {{branchName}}
 ## PR description
 {{body}}
 
+{{#if comments.length}}
+## Discussion (chronological — this is usually where the actual requests are)
+{{#each comments}}
+— **{{this.author}}**{{#if this.location}} · {{this.location}}{{/if}}:
+{{this.body}}
+
+{{/each}}
+{{else}}
+## Discussion
+_(no comments yet)_
+{{/if}}
+
 ## Working agreement
 
 - `/workspace` is the PR's own branch. Make your changes directly there — they

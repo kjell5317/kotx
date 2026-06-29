@@ -9,6 +9,15 @@ Branch (already checked out at /workspace): {{branchName}}
 ## Issue description
 {{body}}
 
+{{#if comments.length}}
+## Discussion (chronological — may contain clarifications or extra requirements)
+{{#each comments}}
+— **{{this.author}}**:
+{{this.body}}
+
+{{/each}}
+{{/if}}
+
 ## Working agreement
 
 - Work in `/workspace`; it is the branch above. Make all your changes there.

@@ -227,6 +227,7 @@ export async function processJob(job: TaskJob): Promise<void> {
       branchName: branch,
       title: subject.title,
       body: subject.body,
+      comments: subject.comments,
     });
     await writeFile(join(runOutputDir, "TASK.md"), taskMd, "utf8");
 
