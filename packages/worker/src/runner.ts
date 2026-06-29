@@ -1,3 +1,5 @@
+import { cp, mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import Docker from "dockerode";
 import { loadDefaults, loadEnv, logger } from "@kotx/shared";
 
@@ -53,6 +55,17 @@ export async function runCodexContainer(opts: {
     "> /run-output/codex.jsonl 2>&1",
   ].join(" ");
 
+  // Codex needs a WRITABLE CODEX_HOME (app-server init, PATH aliases). Give each
+  // run its own private copy seeded with the auth, so concurrent runners never
+  // share/race a writable auth dir (preserves the intent of SPEC §D4).
+  const perRunCodexHome = join(opts.runOutputDir, "codex-home");
+  await mkdir(perRunCodexHome, { recursive: true });
+  for (const f of ["auth.json", "config.toml"]) {
+    await cp(join(env.codexHome, f), join(perRunCodexHome, f)).catch(() => {
+      /* config.toml is optional; auth.json missing will surface as a Codex error */
+    });
+  }
+
   const dk = getDocker();
   const created = await dk.createContainer({
     Image: c.image,
@@ -63,7 +76,7 @@ export async function runCodexContainer(opts: {
     HostConfig: {
       Binds: [
         `${opts.worktreePath}:/workspace:rw`,
-        `${env.codexHome}:/home/codex/.codex:ro`,
+        `${perRunCodexHome}:/home/codex/.codex:rw`,
         `${opts.runOutputDir}:/run-output:rw`,
       ],
       NetworkMode: c.network,
