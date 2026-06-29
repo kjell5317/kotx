@@ -36,20 +36,21 @@ export async function runCodexContainer(opts: {
   name: string;
   worktreePath: string;
   runOutputDir: string;
+  mirrorPath: string;
 }): Promise<number> {
   const env = loadEnv();
   const defaults = loadDefaults();
-  const { container: c, codex } = defaults;
+  const { container: c } = defaults;
 
   const script = [
     "codex",
     "exec",
     "--json",
-    // don't persist session files — CODEX_HOME is mounted read-only
     "--ephemeral",
-    `--sandbox ${codex.sandbox}`,
-    // approval policy is a config value in exec mode (no --ask-for-approval flag)
-    `-c approval_policy=${codex.approval_policy}`,
+    // The Docker container IS the sandbox (caps dropped, no socket, minimal
+    // mounts, no host creds). Codex's own bwrap sandbox can't create a user
+    // namespace inside it, so bypass it and let the container be the boundary.
+    "--dangerously-bypass-approvals-and-sandbox",
     "-",
     "< /run-output/TASK.md",
     "> /run-output/codex.jsonl 2>&1",
@@ -78,6 +79,9 @@ export async function runCodexContainer(opts: {
         `${opts.worktreePath}:/workspace:rw`,
         `${perRunCodexHome}:/home/codex/.codex:rw`,
         `${opts.runOutputDir}:/run-output:rw`,
+        // mount the bare mirror at the SAME path so the worktree's .git gitfile
+        // (gitdir: <mirror>/worktrees/<id>) resolves and git works in-container
+        `${opts.mirrorPath}:${opts.mirrorPath}:rw`,
       ],
       NetworkMode: c.network,
       NanoCpus: Math.floor(c.cpus * 1e9),

@@ -31,6 +31,7 @@ import {
   addReviewWorktree,
   commitAll,
   ensureMirrorFetched,
+  mirrorPath,
   pushBranch,
   removeWorktree,
 } from "./git.js";
@@ -59,6 +60,7 @@ async function runWithGuards(
   name: string,
   worktreePath: string,
   runOutputDir: string,
+  mirror: string,
   taskId: number,
 ): Promise<Guarded> {
   const wallClock = loadDefaults().timeouts.task_wall_clock_sec;
@@ -84,6 +86,7 @@ async function runWithGuards(
       name,
       worktreePath,
       runOutputDir,
+      mirrorPath: mirror,
     });
     return { exitCode, killedByTimeout, killedByCancel };
   } finally {
@@ -195,6 +198,7 @@ export async function processJob(job: TaskJob): Promise<void> {
       name,
       worktreePath,
       runOutputDir,
+      mirrorPath(task.repo_full_name),
       task.id,
     );
 
