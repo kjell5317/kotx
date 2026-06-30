@@ -148,6 +148,7 @@ export async function runCodexContainer(opts: {
   const wait = useDind
     ? "for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done; "
     : "";
+  const effort = defaults.codex.reasoning_effort;
   const script =
     wait +
     [
@@ -160,6 +161,8 @@ export async function runCodexContainer(opts: {
       // user namespace inside it, so bypass it and let the container be the
       // boundary; any docker use targets the isolated sidecar daemon.
       "--dangerously-bypass-approvals-and-sandbox",
+      // operator-configured reasoning effort (omitted → model/config.toml default)
+      ...(effort ? ["-c", `model_reasoning_effort="${effort}"`] : []),
       "-",
       "< /run-output/PROMPT.md",
       "> /run-output/codex.jsonl 2>&1",

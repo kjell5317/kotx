@@ -26,6 +26,9 @@ codex:
   sandbox: "workspace-write"
   approval_policy: "never" # -c approval_policy=<value>; never = run in-sandbox, no prompts
   auth_refresh_skew_sec: 600 # refresh token if it expires within 10 min
+  # -c model_reasoning_effort=<value>: minimal | low | medium | high | xhigh (needs a
+  # reasoning model). Comment out to use the model/config.toml default.
+  reasoning_effort: "high"
 
 policy:
   auto_merge: false # INVARIANT

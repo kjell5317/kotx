@@ -346,7 +346,9 @@ uses the configured `container.network` and Codex has no Docker access.
 ## 11. Configuration
 
 - `config/defaults.yml` — concurrency, timeouts, container limits, codex flags
-  (`approval_policy` retained but the runner currently bypasses sandbox/approval).
+  (`approval_policy` retained but the runner currently bypasses sandbox/approval;
+  `reasoning_effort` maps to `-c model_reasoning_effort=<value>`, omit for the
+  model default).
 - `config/repos.yml` — operator-owned allowlist; per repo: `enabled`,
   `default_branch`, `assignee_login` (my login — also the review-request login),
   `poll`. Never read from a target repo. (The unused `allow_infra_changes`/

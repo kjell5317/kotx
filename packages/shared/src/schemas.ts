@@ -28,6 +28,9 @@ export const defaultsSchema = z.object({
     // maps to `-c approval_policy=<value>`; values: untrusted|on-failure|on-request|never
     approval_policy: z.string(),
     auth_refresh_skew_sec: z.number().int().nonnegative(),
+    // maps to `-c model_reasoning_effort=<value>` (requires a reasoning model).
+    // Omit to use the model/config.toml default.
+    reasoning_effort: z.enum(["minimal", "low", "medium", "high", "xhigh"]).optional(),
   }),
   policy: z.object({
     // auto_merge / auto_deploy are invariants — must be false if present.
