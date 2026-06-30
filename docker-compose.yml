@@ -14,7 +14,7 @@ services:
 
   # one-shot: applies pending DB migrations, then exits. app/worker wait for it.
   migrate:
-    image: ${KOTX_IMAGE:-ghcr.io/kjell5317/kotx-app:latest}
+    image: ${KOTX_IMAGE:?Set KOTX_IMAGE to your published kotx-app image}
     # --no-single-transaction: each migration commits on its own, so a migration
     # that ADDs an enum value can be followed by one that USES it (Postgres
     # forbids both in one transaction).
@@ -35,7 +35,7 @@ services:
         condition: service_healthy
 
   app:
-    image: ${KOTX_IMAGE:-ghcr.io/kjell5317/kotx-app:latest}
+    image: ${KOTX_IMAGE:?Set KOTX_IMAGE to your published kotx-app image}
     restart: unless-stopped
     command: ["node", "packages/app/dist/index.js"]
     env_file: .env
@@ -59,7 +59,7 @@ services:
         condition: service_completed_successfully
 
   worker:
-    image: ${KOTX_IMAGE:-ghcr.io/kjell5317/kotx-app:latest}
+    image: ${KOTX_IMAGE:?Set KOTX_IMAGE to your published kotx-app image}
     restart: unless-stopped
     command: ["node", "packages/worker/dist/index.js"]
     env_file: .env
@@ -88,6 +88,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: kotx
+      # Local default only. Change this and DATABASE_URL before any exposed use.
       POSTGRES_PASSWORD: kotx
       POSTGRES_DB: kotx
     volumes:

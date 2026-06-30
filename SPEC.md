@@ -31,7 +31,7 @@ A merged/closed PR closes its open tasks (`done`/`cancelled`).
 
 ## 1. What's working
 
-Verified end-to-end on `TUM-Social-AI/AflaConnect` during bring-up:
+Verified during bring-up on a private allowlisted repository:
 
 - **Ingestion → queue → worker.** Webhook receiver verifies the HMAC signature,
   de-dupes deliveries, checks eligibility, creates a task, and enqueues it.
@@ -96,7 +96,7 @@ Ordered roughly by priority:
 ## 3. Goal
 
 A private coding agent that reacts to GitHub issues/PRs assigned to me, runs
-Codex in isolated Docker containers on a Hetzner VPS, and **pushes branches +
+Codex in isolated Docker containers on an operator-owned Docker host, and **pushes branches +
 posts plain summaries as me**. It never opens PRs, never merges, never deploys,
 and nothing it writes should read as machine-authored.
 
@@ -325,13 +325,13 @@ uses the configured `container.network` and Codex has no Docker access.
 
 ---
 
-## 10. Deployment (Hetzner + Docker + CI)
+## 10. Deployment (Docker + CI)
 
-- Single VPS (Ubuntu), Docker + Compose. Codex CLI logged in **on the host**
+- Single operator-owned host, Docker + Compose. Codex CLI logged in **on the host**
   once; auth copied/seeded into `CODEX_HOME`, then copied per-run into runners.
 - **CI** (`.github/workflows/build-images.yml`) builds + pushes `kotx-app` and
-  `kotx-runner` to GHCR on push to `main` / `v*` tags. `kotx-runner` pins the
-  Codex CLI version and `uv` version.
+  `kotx-runner` to GHCR under the operator's repository owner on push to `main`
+  / `v*` tags. `kotx-runner` pins the Codex CLI version and `uv` version.
 - Compose pulls `kotx-app` for app/worker; the worker **auto-pulls
   `kotx-runner`** if missing (won't replace an existing `:latest` — `docker pull`
   to refresh after a new build).

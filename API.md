@@ -5,7 +5,7 @@ workflows (see [SPEC.md](SPEC.md) §0). Served by the `app` service.
 
 ## Connecting
 
-- **Base URL**: `$PUBLIC_BASE_URL` (e.g. `https://code.kjellhanken.de`).
+- **Base URL**: `$PUBLIC_BASE_URL` (e.g. `https://agent.example.com`).
 - **Auth**: every `/api/*` request needs `Authorization: Bearer $API_TOKEN`.
   Missing/blank token → `401`; if the server has no `API_TOKEN` set → `503`.
 - **CORS**: set `CORS_ORIGIN` to your frontend's origin to allow browser calls.
@@ -14,7 +14,7 @@ workflows (see [SPEC.md](SPEC.md) §0). Served by the `app` service.
 
 ```bash
 curl -H "Authorization: Bearer $API_TOKEN" \
-  https://code.kjellhanken.de/api/tasks?scope=active
+  https://agent.example.com/api/tasks?scope=active
 ```
 
 ## Endpoints
@@ -49,7 +49,7 @@ content type is rejected by the server with `415 Unsupported Media Type`.
 curl -X PUT -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: text/markdown" \
   --data-binary @TASK.md \
-  "https://code.kjellhanken.de/api/tasks/21/task"
+  "https://agent.example.com/api/tasks/21/task"
 ```
 
 ## The task object
@@ -98,7 +98,7 @@ Use `status` for display and the `can*` flags to decide which buttons to show.
   "id": "a1b2c3d4e5f6",
   "name": "codex-task-42",
   "runId": 42,
-  "image": "ghcr.io/kjell5317/kotx-runner:latest",
+  "image": "ghcr.io/your-github-owner/kotx-runner:latest",
   "state": "running",
   "status": "Up 2 minutes",
   "createdAt": 1751277600         // unix seconds

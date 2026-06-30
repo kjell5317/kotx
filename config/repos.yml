@@ -1,8 +1,8 @@
 # Operator-owned allowlist. A repo absent here (or enabled:false) is rejected at
-# the webhook stage. This file is NEVER read from a target repo (SPEC §D5).
+# the webhook stage. This file is NEVER read from a target repo.
 repos:
-  - full_name: "TUM-Social-AI/AflaConnect"
+  - full_name: "your-github-owner/your-repo"
     enabled: true
     default_branch: "main"
-    assignee_login: "kjell5317"
+    assignee_login: "your-github-login"
     poll: false
