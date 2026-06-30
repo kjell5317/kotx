@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import Handlebars from "handlebars";
+import type { DraftFollowUpInput } from "@kotx/shared";
 
 const PROMPTS_DIR = process.env.PROMPTS_DIR ?? join(process.cwd(), "prompts");
 
@@ -32,6 +33,10 @@ export interface TaskContext {
   mergeConflicts?: string[];
   // draft only: differentiates first-assignment from a follow-up.
   isFollowUp?: boolean;
+  // draft follow-up only: prior reviewed TASK.md plus latest triggering input.
+  previousTaskBrief?: string;
+  followUpInput?: DraftFollowUpInput;
+  needsFollowUpFallback?: boolean;
   // implement only: the approved TASK.md brief, embedded as the instructions.
   taskBrief?: string;
   // true when the per-run dev-container (DinD) sidecar is enabled.

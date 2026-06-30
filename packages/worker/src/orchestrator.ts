@@ -5,6 +5,7 @@ import {
   clearCancelFlag,
   enqueueTask,
   finishRun,
+  findLatestPriorImplementTask,
   getEnabledRepo,
   getOctokit,
   getRun,
@@ -22,6 +23,7 @@ import {
   setTaskState,
   taskDirFor,
   TERMINAL_STATES,
+  type DraftFollowUpInput,
   type RunOutcome,
   type Task,
   type TaskJob,
@@ -163,6 +165,7 @@ interface RunCtx {
   mirror: string;
   // a draft run is a follow-up (new activity) rather than a first assignment
   followUp: boolean;
+  followUpInput?: DraftFollowUpInput;
   // record why a run failed, surfaced in the finish notification
   setReason: (reason: string) => void;
 }
@@ -201,7 +204,16 @@ async function runPrompt(
 
 /** Branch 1, draft phase: read-only refinement → TASK.md, then await my start. */
 async function runDraft(ctx: RunCtx): Promise<void> {
-  const guarded = await runPrompt(ctx, "draft", { isFollowUp: ctx.followUp });
+  const previousTaskBrief = ctx.followUp
+    ? await loadPreviousTaskBrief(ctx)
+    : null;
+  const hasTriggerBody = !!ctx.followUpInput?.body.trim();
+  const guarded = await runPrompt(ctx, "draft", {
+    isFollowUp: ctx.followUp,
+    previousTaskBrief: previousTaskBrief ?? undefined,
+    followUpInput: ctx.followUpInput,
+    needsFollowUpFallback: ctx.followUp && (!previousTaskBrief || !hasTriggerBody),
+  });
   const taskMd = await readArtifact(ctx.worktreePath, "TASK.md");
   const outcome = classifyOutcome({
     exitCode: guarded.exitCode,
@@ -227,6 +239,20 @@ async function runDraft(ctx: RunCtx): Promise<void> {
     );
   }
   await removeWorktree(ctx.repoFullName, ctx.worktreePath);
+}
+
+async function loadPreviousTaskBrief(ctx: RunCtx): Promise<string | null> {
+  const current = await readArtifact(ctx.taskDir, "TASK.md");
+  if (current) return current;
+
+  const prior = await findLatestPriorImplementTask({
+    repoFullName: ctx.task.repo_full_name,
+    subjectType: ctx.task.subject_type,
+    subjectNumber: ctx.task.subject_number,
+    excludeTaskId: ctx.task.id,
+  });
+  if (!prior) return null;
+  return readArtifact(taskDirFor(loadEnv().agentDataDir, prior.id), "TASK.md");
 }
 
 /** Branch 1, execute phase: implement the approved brief, push, comment. */
@@ -488,8 +514,13 @@ export async function processJob(job: TaskJob): Promise<void> {
       taskDir: taskDirFor(env.agentDataDir, task.id),
       containerName: name,
       mirror: mirrorPath(task.repo_full_name),
-      // a draft is a follow-up if the task already had a previous run
-      followUp: run.attempt > 1,
+      // Follow-up drafts can be a refresh of the same task or a new task opened
+      // after a previous implementation moved out of the active slot.
+      followUp:
+        job.kind === "implement" &&
+        job.phase === "draft" &&
+        (run.attempt > 1 || !!job.followUpInput),
+      followUpInput: job.followUpInput,
       setReason: (reason) => {
         failureReason = reason;
       },

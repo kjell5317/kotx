@@ -15,7 +15,9 @@ import {
   logger,
   setTaskPrAndState,
   setTaskState,
+  setTaskTrigger,
   splitRepo,
+  type DraftFollowUpInput,
   type JobPhase,
   type RepoConfig,
   type SubjectType,
@@ -38,6 +40,7 @@ async function enqueueRun(
   runId: number,
   kind: TaskKind,
   phase: JobPhase,
+  followUpInput?: DraftFollowUpInput,
 ): Promise<void> {
   await enqueueTask({
     taskId: task.id,
@@ -46,6 +49,7 @@ async function enqueueRun(
     phase,
     repoFullName: task.repo_full_name,
     subject: { type: task.subject_type, number: task.subject_number },
+    followUpInput,
   });
 }
 
@@ -58,6 +62,7 @@ interface NewTaskInput {
   initialState: "drafting" | "queued";
   triggeredBy: string;
   triggerCommentUrl?: string | null;
+  followUpInput?: DraftFollowUpInput;
 }
 
 async function createAndEnqueue(input: NewTaskInput): Promise<IngestResult> {
@@ -75,7 +80,13 @@ async function createAndEnqueue(input: NewTaskInput): Promise<IngestResult> {
     dataDir: loadEnv().agentDataDir,
   });
   if (!created) return { status: "ignored", reason: "already-active-race" };
-  await enqueueRun(created.task, created.run.id, input.kind, input.phase);
+  await enqueueRun(
+    created.task,
+    created.run.id,
+    input.kind,
+    input.phase,
+    input.followUpInput,
+  );
   logger.info(
     { taskId: created.task.id, kind: input.kind, repo: input.repo.full_name },
     "task enqueued",
@@ -93,6 +104,7 @@ export async function startDraft(
   subject: NormalizedSubject,
   triggeredBy: string,
   triggerCommentUrl: string | null,
+  followUpInput?: DraftFollowUpInput,
 ): Promise<IngestResult> {
   if (subject.state !== "open")
     return { status: "ignored", reason: "subject-closed" };
@@ -103,8 +115,9 @@ export async function startDraft(
     // active task alone (don't pile work onto something already running).
     if (active.kind === "implement" && (active.state === "draft" || active.state === "drafting")) {
       const run = await addRun(active.id, loadEnv().agentDataDir);
-      await enqueueRun(active, run.id, "implement", "draft");
-      logger.info({ taskId: active.id }, "draft refreshed");
+      await setTaskTrigger(active.id, triggeredBy, triggerCommentUrl);
+      await enqueueRun(active, run.id, "implement", "draft", followUpInput);
+      logger.info({ taskId: active.id, triggeredBy }, "draft refreshed");
       return { status: "enqueued", taskId: active.id };
     }
     return { status: "ignored", reason: `already-active:${active.state}` };
@@ -119,6 +132,7 @@ export async function startDraft(
     initialState: "drafting",
     triggeredBy,
     triggerCommentUrl,
+    followUpInput,
   });
 }
 
@@ -389,7 +403,13 @@ export async function ingest(n: Normalized): Promise<IngestResult> {
       return { status: "ignored", reason: "not-assigned-to-me" };
     if (isAgentComment(n.comment.body))
       return { status: "ignored", reason: "agent-comment" };
-    return startDraft(repo, subject, n.comment.authorLogin, n.comment.htmlUrl || null);
+    return startDraft(
+      repo,
+      subject,
+      n.comment.authorLogin,
+      n.comment.htmlUrl || null,
+      n.comment,
+    );
   }
 
   return { status: "ignored", reason: "non-trigger" };
