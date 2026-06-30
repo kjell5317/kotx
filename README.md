@@ -1,8 +1,8 @@
 # kotx — personal concurrent Codex agent
 
 A private coding agent that reacts to GitHub activity on issues/PRs that involve
-you, runs Codex in isolated Docker containers on a Hetzner VPS, and acts **as
-you** (commits, pushes, comments). It is **headless** — it exposes a
+you, runs Codex in isolated Docker containers on your own Docker host, and acts
+**as you** (commits, pushes, comments). It is **headless** — it exposes a
 Bearer-protected JSON API for an external frontend to drive. It never opens PRs
 on its own, never merges, and never deploys.
 
@@ -56,35 +56,106 @@ All `/api/*` routes require `Authorization: Bearer $API_TOKEN`.
 | `POST /api/tasks/:id/stop` | cancel a task |
 | `GET /api/containers` | live `docker ps` of the running codex runners |
 
-## Local / first run
+## Setup
 
-> Requires Node 20+, Docker, and a GitHub personal access token.
->
-> Auth uses your **personal account** via a PAT (prefer a fine-grained PAT scoped
-> to the allowlisted repos: Contents + Issues + Pull requests r/w + Metadata).
-> The agent commits, pushes, and comments **as you**. For webhooks, add a per-repo
-> webhook (repo Settings → Webhooks) pointing at `$PUBLIC_BASE_URL/github/webhook`,
-> content type `application/json`, same `GITHUB_WEBHOOK_SECRET`, sending **issues,
-> pull_request, pull_request_review, issue_comment, pull_request_review_comment**,
-> and **push** events.
+Prerequisites:
+
+- Node 20+ and npm
+- Docker Engine with Compose
+- GitHub CLI or a browser for creating a fine-grained personal access token
+- Codex CLI installed on the host that runs the worker
+- A GitHub repository under your control for publishing the two container images
+
+Auth uses your **personal account** via a PAT. Prefer a fine-grained PAT scoped
+only to the repos in `config/repos.yml` with Contents, Issues, and Pull requests
+read/write plus Metadata read. The agent commits, pushes, and comments **as
+you**. This is a personal tool, not a multi-tenant service or production-hardened
+automation platform.
 
 ```bash
-cp .env.example .env          # fill in GITHUB_TOKEN, webhook secret, commit identity, API_TOKEN
-# edit config/repos.yml to allowlist your repo + set assignee_login (your login)
+cp .env.example .env
+# fill required values in .env
+# edit config/repos.yml to allowlist your repo and set assignee_login to your login
 
 npm install
 npm run build
 npm run typecheck             # whole-workspace type check
 
-# Codex auth, once, on the host that runs the worker:
+# Codex auth, once, on the host that runs the worker.
+# Use the same path you put in .env as CODEX_HOME.
 export CODEX_HOME=/srv/agent/codex-home
 codex login --device-auth
+```
 
+Build and publish your own images before starting Compose:
+
+```bash
+# Option A: let GitHub Actions publish ghcr.io/<owner>/kotx-app and
+# ghcr.io/<owner>/kotx-runner from your fork.
+
+# Option B: build and push manually.
+docker build -t ghcr.io/<owner>/kotx-app:latest .
+docker build -t ghcr.io/<owner>/kotx-runner:latest runner
+docker push ghcr.io/<owner>/kotx-app:latest
+docker push ghcr.io/<owner>/kotx-runner:latest
+```
+
+Set `KOTX_IMAGE` and `CODEX_RUNNER_IMAGE` in `.env` to those image refs. If the
+GHCR packages are private, run `docker login ghcr.io` on the host for Compose and
+set `GHCR_USERNAME`/`GHCR_TOKEN` so the worker can pull the runner image.
+
+For webhook mode, add a per-repo webhook in GitHub repo Settings -> Webhooks:
+
+- Payload URL: `$PUBLIC_BASE_URL/github/webhook`
+- Content type: `application/json`
+- Secret: the same value as `GITHUB_WEBHOOK_SECRET`
+- Events: `issues`, `pull_request`, `pull_request_review`, `issue_comment`, `pull_request_review_comment`, and `push`
+
+For repos where you cannot add webhooks, set `poll: true` in `config/repos.yml`.
+
+Start the services:
+
+```bash
 # the `migrate` service applies pending DB migrations automatically before
 # app/worker start — no manual migrate step needed.
 docker compose pull
 docker compose up -d
 ```
+
+## Configuration
+
+`config/repos.yml` is intentionally committed as a neutral sample because the
+app requires `config/repos.yml` at runtime. Replace the sample repo before
+running. A repo absent from this allowlist, or present with `enabled: false`, is
+ignored.
+
+Required environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `GITHUB_TOKEN` or `GITHUB_TOKEN_FILE` | Personal access token used for GitHub REST plus git fetch/push |
+| `GITHUB_WEBHOOK_SECRET` | HMAC secret shared with each GitHub webhook |
+| `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL` | Commit identity used by the worker |
+| `DATABASE_URL` | Postgres connection string |
+| `REDIS_URL` | Redis connection string |
+| `KOTX_IMAGE` | Your published app/worker image |
+| `CODEX_RUNNER_IMAGE` | Your published runner image |
+
+Common optional environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `PUBLIC_BASE_URL` | Public URL used for webhooks and links; defaults to localhost in code |
+| `PORT`, `HOST` | Fastify bind settings |
+| `AGENT_DATA_DIR` | Host data directory for mirrors, worktrees, runs, and task artifacts |
+| `CODEX_HOME` | Host Codex auth/config directory seeded by `codex login --device-auth` |
+| `CONFIG_DIR` | Directory containing `defaults.yml` and `repos.yml` |
+| `API_TOKEN` | Bearer token enabling `/api/*`; unset disables the API with `503` |
+| `CORS_ORIGIN` | Browser frontend origin allowed by CORS |
+| `GHCR_USERNAME`, `GHCR_TOKEN` | Credentials for worker pulls of private GHCR runner images |
+| `POLL_INTERVAL_SEC` | Polling cadence for repos with `poll: true` |
+| `HA_BASE_URL`, `HA_TOKEN`, `HA_NOTIFY_SERVICE` | Optional Home Assistant notification integration; all three are required to enable it |
+| `LOG_LEVEL` | Pino log level |
 
 ## Images & CI
 
@@ -101,3 +172,20 @@ a task (`CODEX_RUNNER_IMAGE`); set `GHCR_USERNAME`/`GHCR_TOKEN` (a PAT with
 bind-mounted from the cloned repo, so editing `repos.yml` or a prompt needs only a
 `docker compose up -d` (restart the worker to clear its compiled-prompt cache),
 not a rebuild.
+
+## Security Notes
+
+- Keep `.env` out of git. `.env.example` contains placeholders only.
+- Use a fine-grained PAT scoped to the smallest set of allowlisted repositories.
+  Rotate any token that was ever committed, pasted into an issue, or shared.
+- `GITHUB_WEBHOOK_SECRET`, `API_TOKEN`, `GHCR_TOKEN`, and `HA_TOKEN` are secrets.
+  Generate high-entropy values and do not reuse them.
+- The sample Postgres password `kotx` is for local defaults only. Change
+  `POSTGRES_PASSWORD` and `DATABASE_URL` before any exposed deployment.
+- The app and worker mount the host Docker socket. Treat API access and host
+  access as sensitive; this is intended for a single trusted operator.
+- If GHCR packages are private, both the host Docker daemon and the worker need
+  read access. If they are public, do not set unnecessary package tokens.
+- Review `config/repos.yml`, `Caddyfile`, `.env`, and any deployment-specific
+  docs for personal domains, repository names, usernames, and host paths before
+  publishing a fork.
