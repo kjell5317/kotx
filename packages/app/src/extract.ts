@@ -11,6 +11,7 @@ export interface NormalizedSubject {
   // PR-only:
   headRef?: string;
   headRepoFullName?: string;
+  baseRef?: string;
   merged?: boolean;
 }
 
@@ -60,6 +61,7 @@ function subjectFromPull(pr: any): NormalizedSubject {
     body: pr.body ?? "",
     headRef: pr.head?.ref,
     headRepoFullName: pr.head?.repo?.full_name ?? undefined,
+    baseRef: pr.base?.ref,
     merged: !!pr.merged,
   };
 }
