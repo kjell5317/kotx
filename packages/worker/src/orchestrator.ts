@@ -67,13 +67,9 @@ function subjectKindWord(task: Task): string {
   return task.subject_type === "pull_request" ? "pull request" : "issue";
 }
 
-/** Where a notification should deep-link: the triggering comment on a PR if we
- *  have it, otherwise the issue/PR itself. */
-function notifyUrl(task: Task): string {
-  if (task.subject_type === "pull_request" && task.trigger_comment_url)
-    return task.trigger_comment_url;
-  const kind = task.subject_type === "pull_request" ? "pull" : "issues";
-  return `https://github.com/${task.repo_full_name}/${kind}/${task.subject_number}`;
+/** Frontend URL opened when tapping a Home Assistant notification. */
+function notifyUrl(): string | undefined {
+  return loadEnv().corsOrigin;
 }
 
 const STATE_WORD: Record<string, string> = {
@@ -439,7 +435,7 @@ export async function processJob(job: TaskJob): Promise<void> {
       title: `${subjectLabel(task)} started`,
       message: task.repo_full_name,
       tag: `kotx-task-${task.id}`,
-      url: notifyUrl(task),
+      url: notifyUrl(),
     });
     started = true;
 
@@ -546,7 +542,7 @@ export async function processJob(job: TaskJob): Promise<void> {
         title: `${subjectLabel(task)} ${STATE_WORD[state] ?? state}`,
         message,
         tag: `kotx-task-${task.id}`,
-        url: notifyUrl(task),
+        url: notifyUrl(),
       }).catch(() => {});
     }
     await releaseRepoSlot(task.repo_full_name, slot, holderId).catch(() => {});
