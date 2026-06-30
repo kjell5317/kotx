@@ -9,8 +9,8 @@ workflows (see [SPEC.md](SPEC.md) §0). Served by the `app` service.
 - **Auth**: every `/api/*` request needs `Authorization: Bearer $API_TOKEN`.
   Missing/blank token → `401`; if the server has no `API_TOKEN` set → `503`.
 - **CORS**: set `CORS_ORIGIN` to your frontend's origin to allow browser calls.
-- **Content types**: list/detail endpoints return JSON; the `…/task` and
-  `…/review` endpoints return `text/markdown`.
+- **Content types**: list/detail and `…/log` endpoints return JSON; the
+  `…/task` and `…/review` endpoints return `text/markdown`.
 
 ```bash
 curl -H "Authorization: Bearer $API_TOKEN" \
@@ -30,7 +30,7 @@ curl -H "Authorization: Bearer $API_TOKEN" \
 | `GET /api/tasks/:id/review` | the `REVIEW.md` (markdown). `404` if not generated yet |
 | `PUT /api/tasks/:id/review` | edit the review before approving. Only allowed while `state = awaiting_approval`. Body: raw markdown, or JSON `{ "content": "…" }` |
 | `GET /api/tasks/:id/prompt` | the exact prompt piped into Codex on the latest run (markdown). `404` until a run has started |
-| `GET /api/tasks/:id/log` | the raw Codex transcript (JSONL) for the latest run — useful for diagnosing failures |
+| `GET /api/tasks/:id/log` | a bounded JSON page of the latest run's Codex transcript. Defaults to the newest 200 JSONL entries; `404` until a log exists |
 | `POST /api/tasks/:id/approve` | **Branch 3**: post `REVIEW.md` as a PR comment. Only valid from `state = awaiting_approval` → `awaiting_external` (`status = in review`) |
 | `POST /api/tasks/:id/stop` | cancel the task (signals the worker / kills the container). `409` if already terminal |
 | `POST /api/tasks/:id/discard` | dismiss a task of any kind from the active list → `state = cancelled`, with `stateReason = "discarded from the API"`. Also signals cancel. `409` if already terminal |
@@ -50,6 +50,48 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: text/markdown" \
   --data-binary @TASK.md \
   "https://agent.example.com/api/tasks/21/task"
+```
+
+## Log pagination
+
+`GET /api/tasks/:id/log` reads `codex.jsonl` from the task's latest run and
+returns a JSON object instead of the raw NDJSON file. By default it returns the
+newest 200 complete JSONL lines without loading the full log into memory.
+
+Query parameters:
+
+| Parameter | Meaning |
+| --- | --- |
+| `limit` | Number of JSONL lines to return. Default `200`, maximum `1000`. Values outside `1..1000` return `400`. |
+| `before` | Optional byte cursor. Return the newest `limit` lines ending before this offset. Use `page.nextBefore` from the previous response to page older. Must be a non-negative integer, cannot exceed the current log size, and must point to a line boundary unless it equals the end of the file. |
+
+Response shape:
+
+```jsonc
+{
+  "runId": 123,
+  "entries": [
+    { "offset": 77120, "record": { "type": "event", "message": "..." } },
+    { "offset": 77308, "raw": "not json", "parseError": "Unexpected token ..." }
+  ],
+  "page": {
+    "limit": 200,
+    "count": 2,
+    "startOffset": 77120,
+    "endOffset": 77488,
+    "sizeBytes": 77488,
+    "hasMoreBefore": true,
+    "hasMoreAfter": false,
+    "nextBefore": 77120
+  }
+}
+```
+
+To fetch older entries:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://agent.example.com/api/tasks/21/log?limit=200&before=77120"
 ```
 
 ## The task object
