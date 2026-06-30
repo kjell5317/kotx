@@ -130,6 +130,7 @@ export async function createTaskWithRun(input: {
   repoFullName: string;
   subjectType: SubjectType;
   subjectNumber: number;
+  subjectTitle: string | null;
   kind: TaskKind;
   role: TaskRole;
   // initial lifecycle state: 'drafting' for Branch 1 (a draft run produces
@@ -147,13 +148,14 @@ export async function createTaskWithRun(input: {
     try {
       const t = await client.query<Task>(
         `INSERT INTO tasks
-           (repo_full_name, subject_type, subject_number, kind, role, state, branch_name, triggered_by, trigger_comment_url)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+           (repo_full_name, subject_type, subject_number, subject_title, kind, role, state, branch_name, triggered_by, trigger_comment_url)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
          RETURNING *`,
         [
           input.repoFullName,
           input.subjectType,
           input.subjectNumber,
+          input.subjectTitle,
           input.kind,
           input.role,
           input.initialState,

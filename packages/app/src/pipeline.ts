@@ -65,6 +65,7 @@ async function createAndEnqueue(input: NewTaskInput): Promise<IngestResult> {
     repoFullName: input.repo.full_name,
     subjectType: input.subject.type,
     subjectNumber: input.subject.number,
+    subjectTitle: input.subject.title || null,
     kind: input.kind,
     role: input.role,
     initialState: input.initialState,

@@ -59,6 +59,7 @@ function taskDto(t: TaskListItem) {
     repo: t.repo_full_name,
     subjectType: t.subject_type,
     subjectNumber: t.subject_number,
+    title: t.subject_title,
     kind: t.kind,
     role: t.role,
     state: t.state,

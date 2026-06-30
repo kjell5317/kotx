@@ -102,6 +102,7 @@ curl -H "Authorization: Bearer $TOKEN" \
   "repo": "owner/repo",
   "subjectType": "issue",          // "issue" | "pull_request"
   "subjectNumber": 31,
+  "title": "Add a metadata index", // issue/PR title at task creation; null for pre-existing rows
   "kind": "implement",             // "implement" | "resolve_conflict" | "review"
   "role": "assignee",              // "assignee" | "reviewer"
   "state": "draft",                // drafting|draft|queued|running|awaiting_approval|awaiting_external|done|failed|cancelled

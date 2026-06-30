@@ -76,6 +76,7 @@ export interface Task {
   repo_full_name: string;
   subject_type: SubjectType;
   subject_number: number;
+  subject_title: string | null;
   kind: TaskKind;
   role: TaskRole;
   state: TaskState;
