@@ -256,7 +256,9 @@ async function runResolveConflict(ctx: RunCtx, merge: MergeResult): Promise<void
     if (merge.advanced)
       await pushBranch(ctx.repoFullName, ctx.branch, gitToken());
     await finishRun(ctx.runId, { outcome: "completed", exitCode: 0, resultMd: null });
-    await setTaskState(ctx.task.id, "awaiting_external");
+    // If we pushed a merge, the PR is updated and waits on review/merge; if there
+    // was nothing to reconcile (clean, no advance), there's no work left → done.
+    await setTaskState(ctx.task.id, merge.advanced ? "awaiting_external" : "done");
     await removeWorktree(ctx.repoFullName, ctx.worktreePath);
     return;
   }

@@ -8,6 +8,7 @@ import {
   findTasksWaitingOnPr,
   findOpenPrTask,
   getEnabledRepo,
+  hasReviewTask,
   getOctokit,
   loadEnv,
   logger,
@@ -345,27 +346,37 @@ export async function ingest(n: Normalized): Promise<IngestResult> {
     return startReview(repo, subject, n.senderLogin);
   }
 
-  // New commits / (re)open: re-review if my review is still requested, and
-  // re-check mergeability if the PR is mine.
+  // New commits / (re)open: re-review the PR if my review is requested OR I have
+  // already reviewed it (GitHub drops me from requested_reviewers once a review is
+  // recorded, so requested_reviewers alone misses re-reviews). Otherwise, if the
+  // PR is assigned to me, re-check mergeability (Branch 2).
   if (
     n.event === "pull_request" &&
     ["synchronize", "opened", "reopened"].includes(n.action)
   ) {
-    if (subject.requestedReviewers.includes(me))
+    if (
+      subject.requestedReviewers.includes(me) ||
+      (await hasReviewTask(repo.full_name, subject.number))
+    )
       return startReview(repo, subject, n.senderLogin);
     if (subject.assignees.includes(me))
       return maybeResolveConflict(repo, subject, n.senderLogin);
     return { status: "ignored", reason: "pr-not-mine" };
   }
 
-  // Branch 1: assignment to an issue/PR.
-  if (
-    (n.event === "issues" || n.event === "pull_request") &&
-    n.action === "assigned"
-  ) {
+  // Branch 1: assignment to an ISSUE → produce a task draft.
+  if (n.event === "issues" && n.action === "assigned") {
     if (n.targetLogin !== me && !subject.assignees.includes(me))
       return { status: "ignored", reason: "assignee-not-me" };
     return startDraft(repo, subject, n.senderLogin, null);
+  }
+
+  // A PR assigned to me is NOT a Branch 1 trigger — assignee work on a PR is
+  // Branch 2 (conflict resolution). Check mergeability instead of drafting.
+  if (n.event === "pull_request" && n.action === "assigned") {
+    if (n.targetLogin !== me && !subject.assignees.includes(me))
+      return { status: "ignored", reason: "assignee-not-me" };
+    return maybeResolveConflict(repo, subject, n.senderLogin);
   }
 
   // Branch 1: a comment or review on an issue/PR I'm assigned to.

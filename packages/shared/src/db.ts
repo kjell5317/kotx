@@ -14,7 +14,10 @@ import type {
 // The states that hold the single active slot per (repo, subject). Mirrors the
 // partial unique index `uq_one_active_task` (migration 1700000003000).
 const ACTIVE_STATE_SQL = `('drafting','draft','queued','running','awaiting_approval')`;
-const TERMINAL_STATE_SQL = `('done','failed','cancelled')`;
+// Includes the legacy 'timed_out'/'discarded' enum values (still present in the
+// Postgres enum) so any row that escaped migration 1700000005000 is still treated
+// as terminal — excluded from "active" and never resurrected by PR reconciliation.
+const TERMINAL_STATE_SQL = `('done','failed','cancelled','timed_out','discarded')`;
 
 const { Pool } = pg;
 
@@ -266,16 +269,38 @@ export async function setTaskPrAndState(
 }
 
 export async function findTasksWaitingOnPr(repoFullName: string): Promise<Task[]> {
+  // Only ISSUE implement tasks wait on a manually-opened PR. PR-subject tasks
+  // already have their PR (the subject), so they must be excluded — otherwise
+  // markPrOpened could stamp an unrelated PR sharing the head branch onto them.
   const res = await getPool().query<Task>(
     `SELECT * FROM tasks
      WHERE repo_full_name = $1
        AND kind = 'implement'
+       AND subject_type = 'issue'
        AND branch_name IS NOT NULL
        AND pr_number IS NULL
        AND state = 'awaiting_external'`,
     [repoFullName],
   );
   return res.rows;
+}
+
+/** Whether a review task already exists for a PR (used to re-review new commits
+ *  even after GitHub drops me from the PR's requested_reviewers). */
+export async function hasReviewTask(
+  repoFullName: string,
+  prNumber: number,
+): Promise<boolean> {
+  const res = await getPool().query(
+    `SELECT 1 FROM tasks
+     WHERE repo_full_name = $1
+       AND kind = 'review'
+       AND subject_type = 'pull_request'
+       AND subject_number = $2
+     LIMIT 1`,
+    [repoFullName, prNumber],
+  );
+  return (res.rowCount ?? 0) > 0;
 }
 
 export async function findOpenPrTask(

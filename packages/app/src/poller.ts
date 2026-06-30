@@ -19,11 +19,43 @@ import {
 } from "./pipeline.js";
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_SEC ?? 30) * 1000;
+// How often to reconcile PR lifecycle for webhook-only repos (catches missed
+// pull_request opened/closed deliveries). Poll repos reconcile in their own tick.
+const RECONCILE_INTERVAL_MS =
+  Number(process.env.RECONCILE_INTERVAL_SEC ?? 120) * 1000;
 // On startup (or after the cursor is lost) look back this far for comments so a
 // brief downtime doesn't drop a follow-up. recordDelivery dedups overlaps.
 const INITIAL_LOOKBACK_MS = 60 * 60 * 1000;
 
 const commentCursor = new Map<string, string>();
+
+/**
+ * Periodic PR-lifecycle reconciliation for webhook-only repos (`poll: false`).
+ * Poll repos already reconcile inside their poll tick; this closes the gap where
+ * a webhook repo misses a `pull_request` opened/closed delivery and would
+ * otherwise leave a task stuck in `awaiting_external`. Returns null if every
+ * enabled repo polls.
+ */
+export function startReconciler(): NodeJS.Timeout | null {
+  const repos = [...loadRepos().values()].filter((r) => r.enabled && !r.poll);
+  if (repos.length === 0) return null;
+  logger.info(
+    { repos: repos.map((r) => r.full_name), intervalMs: RECONCILE_INTERVAL_MS },
+    "PR reconciler enabled",
+  );
+  const tick = async () => {
+    for (const repo of repos) {
+      try {
+        await reconcileWaitingPrs(repo);
+        await reconcileInReview(repo);
+      } catch (err) {
+        logger.error({ err, repo: repo.full_name }, "reconcile failed");
+      }
+    }
+  };
+  void tick();
+  return setInterval(() => void tick(), RECONCILE_INTERVAL_MS);
+}
 
 /** Start polling for repos configured with `poll: true`. Returns null if none. */
 export function startPoller(): NodeJS.Timeout | null {

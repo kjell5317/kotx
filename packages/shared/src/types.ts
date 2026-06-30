@@ -53,6 +53,9 @@ export function displayStatus(state: TaskState): string {
       return "failed";
     case "cancelled":
       return "cancelled";
+    default:
+      // legacy/unknown enum values (e.g. a pre-consolidation 'timed_out' row)
+      return String(state);
   }
 }
 

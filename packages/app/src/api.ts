@@ -81,6 +81,8 @@ function taskDto(t: TaskListItem) {
     canStart: t.kind === "implement" && t.state === "draft",
     canApprove: t.kind === "review" && t.state === "awaiting_approval",
     canStop: t.state === "queued" || t.state === "running" || t.state === "drafting",
+    // any non-terminal task can be dismissed (e.g. one stuck "in review")
+    canDiscard: !TERMINAL_STATES.has(t.state),
   };
 }
 
