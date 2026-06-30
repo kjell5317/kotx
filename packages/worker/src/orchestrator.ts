@@ -41,7 +41,6 @@ import {
 } from "./git.js";
 import {
   fetchSubject,
-  postFailureComment,
   postSummary,
   type SubjectDetails,
 } from "./githubOutputs.js";
@@ -325,13 +324,6 @@ async function finalizeWrite(
       failureState(outcome),
       describeRunFailure(outcome, guarded.exitCode),
     );
-    if (outcome !== "cancelled")
-      await postFailureComment(
-        ctx.octokit,
-        ctx.repoFullName,
-        ctx.task.subject_number,
-        outcome === "timed_out" ? "the run timed out" : "the run failed",
-      );
     await removeWorktree(ctx.repoFullName, ctx.worktreePath);
     return;
   }
@@ -342,12 +334,6 @@ async function finalizeWrite(
     const reason = `unresolved merge conflict markers in: ${markers.slice(0, 20).join(", ")}`;
     ctx.setReason(reason);
     await setTaskState(ctx.task.id, "failed", reason);
-    await postFailureComment(
-      ctx.octokit,
-      ctx.repoFullName,
-      ctx.task.subject_number,
-      reason,
-    );
     await removeWorktree(ctx.repoFullName, ctx.worktreePath);
     return;
   }
@@ -477,12 +463,6 @@ export async function processJob(job: TaskJob): Promise<void> {
         failureReason = "this PR is from a fork — its branch can't be pushed to";
         await finishRun(run.id, { outcome: "failed", exitCode: null, resultMd: null });
         await setTaskState(task.id, "failed", failureReason);
-        await postFailureComment(
-          octokit,
-          task.repo_full_name,
-          task.subject_number,
-          failureReason,
-        );
         return;
       }
       branch = isFork ? `review/pr-${task.subject_number}` : subject.headRef;

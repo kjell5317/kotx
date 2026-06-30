@@ -123,17 +123,3 @@ export async function postSummary(
 ): Promise<void> {
   await postIssueComment(octokit, repoFullName, subjectNumber, body);
 }
-
-export async function postFailureComment(
-  octokit: Octokit,
-  repoFullName: string,
-  subjectNumber: number,
-  reason: string,
-): Promise<void> {
-  await postIssueComment(
-    octokit,
-    repoFullName,
-    subjectNumber,
-    `Couldn't complete the requested changes — ${reason}.`,
-  );
-}
