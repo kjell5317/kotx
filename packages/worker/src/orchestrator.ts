@@ -145,6 +145,15 @@ function failureState(outcome: RunOutcome): TaskState {
   return "failed";
 }
 
+/** A short, human-readable reason for a non-completed run (for notifications). */
+function describeRunFailure(outcome: RunOutcome, exitCode: number): string {
+  if (outcome === "timed_out") return "the run timed out";
+  if (outcome === "cancelled") return "cancelled";
+  return exitCode !== 0
+    ? `Codex exited with code ${exitCode}`
+    : "Codex produced no result";
+}
+
 // Everything a run handler needs after the worktree is checked out.
 interface RunCtx {
   task: Task;
@@ -161,6 +170,8 @@ interface RunCtx {
   mirror: string;
   // a draft run is a follow-up (new activity) rather than a first assignment
   followUp: boolean;
+  // record why a run failed, surfaced in the finish notification
+  setReason: (reason: string) => void;
 }
 
 /** Render the prompt, write it as PROMPT.md, and run the guarded container. */
@@ -215,6 +226,7 @@ async function runDraft(ctx: RunCtx): Promise<void> {
     await writeFile(join(ctx.taskDir, "TASK.md"), taskMd, "utf8");
     await setTaskState(ctx.task.id, "draft");
   } else {
+    ctx.setReason(describeRunFailure(outcome, guarded.exitCode));
     await setTaskState(ctx.task.id, failureState(outcome));
   }
   await removeWorktree(ctx.repoFullName, ctx.worktreePath);
@@ -275,6 +287,7 @@ async function runReview(ctx: RunCtx): Promise<void> {
     await writeFile(join(ctx.taskDir, "REVIEW.md"), reviewMd, "utf8");
     await setTaskState(ctx.task.id, "awaiting_approval");
   } else {
+    ctx.setReason(describeRunFailure(outcome, guarded.exitCode));
     await setTaskState(ctx.task.id, failureState(outcome));
   }
   await removeWorktree(ctx.repoFullName, ctx.worktreePath);
@@ -302,6 +315,7 @@ async function finalizeWrite(
   });
 
   if (outcome !== "completed") {
+    ctx.setReason(describeRunFailure(outcome, guarded.exitCode));
     await setTaskState(ctx.task.id, failureState(outcome));
     if (outcome !== "cancelled")
       await postFailureComment(
@@ -317,12 +331,14 @@ async function finalizeWrite(
   // safety net: never commit unresolved merge conflicts
   const markers = await findConflictMarkers(ctx.worktreePath);
   if (markers.length) {
+    const reason = `unresolved merge conflict markers in: ${markers.slice(0, 20).join(", ")}`;
+    ctx.setReason(reason);
     await setTaskState(ctx.task.id, "failed");
     await postFailureComment(
       ctx.octokit,
       ctx.repoFullName,
       ctx.task.subject_number,
-      `unresolved merge conflict markers remain in: ${markers.slice(0, 20).join(", ")}`,
+      reason,
     );
     await removeWorktree(ctx.repoFullName, ctx.worktreePath);
     return;
@@ -408,6 +424,7 @@ export async function processJob(job: TaskJob): Promise<void> {
   const isWriteKind =
     job.kind === "resolve_conflict" || (job.kind === "implement" && job.phase === "execute");
   let started = false;
+  let failureReason: string | undefined;
 
   try {
     if (await isCancelled(task.id)) {
@@ -449,13 +466,14 @@ export async function processJob(job: TaskJob): Promise<void> {
         !!subject.headRepoFullName &&
         subject.headRepoFullName !== task.repo_full_name;
       if (isFork && isWriteKind) {
+        failureReason = "this PR is from a fork — its branch can't be pushed to";
         await finishRun(run.id, { outcome: "failed", exitCode: null, resultMd: null });
         await setTaskState(task.id, "failed");
         await postFailureComment(
           octokit,
           task.repo_full_name,
           task.subject_number,
-          "this PR comes from a fork, so its branch can't be pushed to",
+          failureReason,
         );
         return;
       }
@@ -484,6 +502,9 @@ export async function processJob(job: TaskJob): Promise<void> {
       mirror: mirrorPath(task.repo_full_name),
       // a draft is a follow-up if the task already had a previous run
       followUp: run.attempt > 1,
+      setReason: (reason) => {
+        failureReason = reason;
+      },
     };
 
     // Only the write-kinds merge the default branch in first. resolve_conflict
@@ -507,15 +528,23 @@ export async function processJob(job: TaskJob): Promise<void> {
     logger.info({ taskId: task.id, runId: run.id, kind: job.kind }, "run finished");
   } catch (err) {
     logger.error({ err, taskId: task.id }, "job failed");
+    failureReason = err instanceof Error ? err.message : String(err);
     await setTaskState(task.id, "failed").catch(() => {});
     await removeWorktree(task.repo_full_name, worktreePath).catch(() => {});
   } finally {
     if (started) {
       const fresh = await getTask(task.id).catch(() => undefined);
       const state = fresh?.state ?? "failed";
+      // include the failure reason in the message so the push notification is
+      // actionable (e.g. "Codex exited with code 1", "the run timed out").
+      const isFailed = state === "failed" || state === "timed_out";
+      const message =
+        isFailed && failureReason
+          ? `${task.repo_full_name} — ${failureReason}`
+          : task.repo_full_name;
       await notify({
         title: `${subjectLabel(task)} ${STATE_WORD[state] ?? state}`,
-        message: task.repo_full_name,
+        message,
         tag: `kotx-task-${task.id}`,
         url: notifyUrl(task),
       }).catch(() => {});

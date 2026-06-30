@@ -264,7 +264,7 @@ export async function closeSubjectTasks(
   const res = await getPool().query(
     `UPDATE tasks SET state = $4
      WHERE repo_full_name = $1 AND subject_type = $2 AND subject_number = $3
-       AND state::text NOT IN ('done','failed','cancelled','timed_out')`,
+       AND state::text NOT IN ('done','failed','cancelled','timed_out','discarded')`,
     [repoFullName, subjectType, subjectNumber, state],
   );
   return res.rowCount ?? 0;
@@ -290,7 +290,7 @@ export async function listTasks(
 ): Promise<TaskListItem[]> {
   const where =
     scope === "active"
-      ? `WHERE t.state::text NOT IN ('done','failed','cancelled','timed_out')`
+      ? `WHERE t.state::text NOT IN ('done','failed','cancelled','timed_out','discarded')`
       : ``;
   const res = await getPool().query<TaskListItem>(
     `SELECT t.*,

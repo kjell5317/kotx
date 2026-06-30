@@ -28,8 +28,12 @@ curl -H "Authorization: Bearer $API_TOKEN" \
 | `PUT /api/tasks/:id/task` | overwrite the brief before starting. Only allowed while `state = draft`. Body: raw markdown, or JSON `{ "content": "…" }` |
 | `POST /api/tasks/:id/start` | **Branch 1**: start the implementation. Only valid from `state = draft` → `queued` |
 | `GET /api/tasks/:id/review` | the `REVIEW.md` (markdown). `404` if not generated yet |
+| `PUT /api/tasks/:id/review` | edit the review before approving. Only allowed while `state = awaiting_approval`. Body: raw markdown, or JSON `{ "content": "…" }` |
+| `GET /api/tasks/:id/prompt` | the exact prompt piped into Codex on the latest run (markdown). `404` until a run has started |
+| `GET /api/tasks/:id/log` | the raw Codex transcript (JSONL) for the latest run — useful for diagnosing failures |
 | `POST /api/tasks/:id/approve` | **Branch 3**: post `REVIEW.md` as a PR comment. Only valid from `state = awaiting_approval` → `done` |
 | `POST /api/tasks/:id/stop` | cancel the task (signals the worker / kills the container). `409` if already terminal |
+| `POST /api/tasks/:id/discard` | dismiss a task of any kind from the active list → `state = discarded`. Also signals cancel. `409` if already terminal |
 | `GET /api/containers` | live `docker ps` of the running codex runners |
 
 Mutating endpoints return `{ ok: true }` on success. Errors return
@@ -45,7 +49,7 @@ Mutating endpoints return `{ ok: true }` on success. Errors return
   "subjectNumber": 31,
   "kind": "implement",             // "implement" | "resolve_conflict" | "review"
   "role": "assignee",              // "assignee" | "reviewer"
-  "state": "draft",                // drafting|draft|queued|running|awaiting_approval|awaiting_external|done|failed|cancelled|timed_out
+  "state": "draft",                // drafting|draft|queued|running|awaiting_approval|awaiting_external|done|failed|cancelled|timed_out|discarded
   "status": "waiting on my approval", // human-readable label for `state`
   "branch": "31-add-metadata-index",
   "triggeredBy": "octocat",
@@ -72,7 +76,7 @@ Use `status` for display and the `can*` flags to decide which buttons to show.
 | `waiting on my approval` | a `TASK.md` is ready to start, or a `REVIEW.md` is ready to post |
 | `queued` / `running` | execution is queued / a container is running |
 | `waiting on external approval` | my changes are pushed; waiting on others to review/merge |
-| `done` / `failed` / `cancelled` / `timed out` | terminal |
+| `done` / `failed` / `cancelled` / `timed out` / `discarded` | terminal (excluded from `scope=active`) |
 
 ## The container object (`GET /api/containers`)
 

@@ -6,12 +6,14 @@ import {
   addRun,
   displayStatus,
   enqueueTask,
+  getLatestRun,
   getOctokit,
   getTask,
   listTasks,
   loadEnv,
   logger,
   postIssueComment,
+  runDirFor,
   setCancelFlag,
   setTaskState,
   taskDirFor,
@@ -74,14 +76,27 @@ function taskDto(t: TaskListItem) {
   };
 }
 
-/** Read a per-task artifact (TASK.md / REVIEW.md) or null if absent. */
-async function readTaskArtifact(taskId: number, name: string): Promise<string | null> {
-  const path = join(taskDirFor(loadEnv().agentDataDir, taskId), name);
+async function readFileOrNull(path: string): Promise<string | null> {
   try {
     return await readFile(path, "utf8");
   } catch {
     return null;
   }
+}
+
+/** Read a per-task artifact (TASK.md / REVIEW.md) or null if absent. */
+function readTaskArtifact(taskId: number, name: string): Promise<string | null> {
+  return readFileOrNull(join(taskDirFor(loadEnv().agentDataDir, taskId), name));
+}
+
+/** Read a file from a task's latest run dir (PROMPT.md / codex.jsonl). */
+async function readLatestRunArtifact(
+  taskId: number,
+  name: string,
+): Promise<string | null> {
+  const run = await getLatestRun(taskId);
+  if (!run) return null;
+  return readFileOrNull(join(runDirFor(loadEnv().agentDataDir, run.id), name));
 }
 
 let docker: Docker | undefined;
@@ -108,7 +123,8 @@ export function registerApi(app: FastifyInstance): void {
     const id = parseId(req, reply);
     if (id === null) return;
     const rows = await listTasks("all", 1000);
-    const row = rows.find((r) => r.id === id);
+    // task ids are BIGINT → pg returns them as strings; coerce before comparing.
+    const row = rows.find((r) => Number(r.id) === id);
     if (!row) return reply.code(404).send({ error: "no such task" });
     return taskDto(row);
   });
@@ -131,9 +147,8 @@ export function registerApi(app: FastifyInstance): void {
     if (!task) return reply.code(404).send({ error: "no such task" });
     if (task.kind !== "implement" || task.state !== "draft")
       return reply.code(409).send({ error: `cannot edit brief in state ${task.state}` });
-    const body = typeof req.body === "string" ? req.body : (req.body as { content?: string })?.content;
-    if (typeof body !== "string" || body.trim() === "")
-      return reply.code(400).send({ error: "empty body" });
+    const body = bodyText(req);
+    if (body === null) return reply.code(400).send({ error: "empty body" });
     const dir = taskDirFor(loadEnv().agentDataDir, id);
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "TASK.md"), body, "utf8");
@@ -147,6 +162,43 @@ export function registerApi(app: FastifyInstance): void {
     const text = await readTaskArtifact(id, "REVIEW.md");
     if (text === null) return reply.code(404).send({ error: "no REVIEW.md" });
     return reply.type("text/markdown").send(text);
+  });
+
+  // Edit the review before approving/posting it.
+  app.put("/api/tasks/:id/review", async (req, reply) => {
+    if (!requireAuth(req, reply)) return;
+    const id = parseId(req, reply);
+    if (id === null) return;
+    const task = await getTask(id);
+    if (!task) return reply.code(404).send({ error: "no such task" });
+    if (task.kind !== "review" || task.state !== "awaiting_approval")
+      return reply.code(409).send({ error: `cannot edit review in state ${task.state}` });
+    const body = bodyText(req);
+    if (body === null) return reply.code(400).send({ error: "empty body" });
+    const dir = taskDirFor(loadEnv().agentDataDir, id);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "REVIEW.md"), body, "utf8");
+    return { ok: true };
+  });
+
+  // The exact prompt piped into Codex on the latest run (for inspection/debug).
+  app.get("/api/tasks/:id/prompt", async (req, reply) => {
+    if (!requireAuth(req, reply)) return;
+    const id = parseId(req, reply);
+    if (id === null) return;
+    const text = await readLatestRunArtifact(id, "PROMPT.md");
+    if (text === null) return reply.code(404).send({ error: "no PROMPT.md yet" });
+    return reply.type("text/markdown").send(text);
+  });
+
+  // The raw Codex transcript (JSONL) for the latest run — useful for failures.
+  app.get("/api/tasks/:id/log", async (req, reply) => {
+    if (!requireAuth(req, reply)) return;
+    const id = parseId(req, reply);
+    if (id === null) return;
+    const text = await readLatestRunArtifact(id, "codex.jsonl");
+    if (text === null) return reply.code(404).send({ error: "no log yet" });
+    return reply.type("application/x-ndjson").send(text);
   });
 
   // Branch 1: start the implementation for a reviewed draft.
@@ -198,6 +250,23 @@ export function registerApi(app: FastifyInstance): void {
     return { ok: true };
   });
 
+  // Dismiss a task (any kind) from the active list. Also signals cancel so a
+  // running container / pending job is stopped. A run that finishes after this
+  // may briefly land as "cancelled" — still terminal, still out of "active".
+  app.post("/api/tasks/:id/discard", async (req, reply) => {
+    if (!requireAuth(req, reply)) return;
+    const id = parseId(req, reply);
+    if (id === null) return;
+    const task = await getTask(id);
+    if (!task) return reply.code(404).send({ error: "no such task" });
+    if (TERMINAL_STATES.has(task.state))
+      return reply.code(409).send({ error: `task already ${task.state}` });
+    await setCancelFlag(id);
+    await setTaskState(id, "discarded");
+    logger.info({ taskId: id }, "task discarded from API");
+    return { ok: true };
+  });
+
   // Live view of the running codex-runner containers.
   app.get("/api/containers", async (req, reply) => {
     if (!requireAuth(req, reply)) return;
@@ -232,6 +301,13 @@ function parseId(req: FastifyRequest, reply: FastifyReply): number | null {
     return null;
   }
   return id;
+}
+
+/** Extract a non-empty markdown body from a PUT: raw text or JSON {content}. */
+function bodyText(req: FastifyRequest): string | null {
+  const b = req.body;
+  const text = typeof b === "string" ? b : (b as { content?: string })?.content;
+  return typeof text === "string" && text.trim() !== "" ? text : null;
 }
 
 async function enqueueRun(

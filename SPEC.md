@@ -232,12 +232,14 @@ Branch 1: drafting → draft → (start) → queued → running → awaiting_ext
 Branch 2:                                queued → running → awaiting_external → done
 Branch 3:                                queued → running → awaiting_approval → (approve) → done
 any:                                     … → failed | cancelled | timed_out
+any (via POST …/discard):                … → discarded
 ```
 
 `displayStatus()` maps these to human labels — `draft`/`awaiting_approval` →
 "waiting on my approval", `awaiting_external` → "waiting on external approval".
 The active-slot guard (`uq_one_active_task`) covers
-`drafting,draft,queued,running,awaiting_approval`.
+`drafting,draft,queued,running,awaiting_approval`. `discarded` is terminal — like
+the other terminal states it's excluded from `scope=active` and frees the slot.
 
 ---
 
@@ -382,9 +384,11 @@ uses the configured `container.network` and Codex has no Docker access.
 `/api/*` is gated by `Authorization: Bearer $API_TOKEN` (timing-safe compare;
 503 if `API_TOKEN` is unset). `CORS_ORIGIN` enables the browser frontend.
 Endpoints: `GET /api/tasks?scope=active|all`, `GET /api/tasks/:id`,
-`GET|PUT /api/tasks/:id/task`, `GET /api/tasks/:id/review`,
-`POST /api/tasks/:id/{start,approve,stop}`, `GET /api/containers`. See
-[README.md](README.md) for the table.
+`GET|PUT /api/tasks/:id/task`, `GET|PUT /api/tasks/:id/review`,
+`GET /api/tasks/:id/prompt` (the exact Codex prompt) and `…/log` (the raw
+transcript) for the latest run, `POST /api/tasks/:id/{start,approve,stop,discard}`,
+`GET /api/containers`. `discard` moves a task of any kind to the terminal
+`discarded` state (hidden from `scope=active`). See [API.md](API.md) for the table.
 
 ---
 

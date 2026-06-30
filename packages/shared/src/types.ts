@@ -16,13 +16,15 @@ export type TaskState =
   | "done"
   | "failed"
   | "cancelled"
-  | "timed_out";
+  | "timed_out"
+  | "discarded"; // dismissed by me from the frontend; hidden from "active"
 
 export const TERMINAL_STATES: ReadonlySet<TaskState> = new Set<TaskState>([
   "done",
   "failed",
   "cancelled",
   "timed_out",
+  "discarded",
 ]);
 
 // States that occupy the single active slot per (repo, subject). awaiting_external
@@ -57,6 +59,8 @@ export function displayStatus(state: TaskState): string {
       return "cancelled";
     case "timed_out":
       return "timed out";
+    case "discarded":
+      return "discarded";
   }
 }
 
