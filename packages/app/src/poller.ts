@@ -1,6 +1,7 @@
 import {
   getOctokit,
   hasAnyTask,
+  isAgentComment,
   findTasksTrackingAnyPr,
   loadRepos,
   logger,
@@ -211,7 +212,9 @@ async function pollComments(
 
   for (const c of res.data) {
     const author = c.user?.login ?? "";
-    if (author === me) continue; // skip my own comments (avoid self-loop)
+    // skip the agent's own posts (marker), but let a human follow-up from the
+    // same account trigger; the assignee gate below still applies.
+    if (isAgentComment(c.body ?? "")) continue;
     const fresh = await recordDelivery(`poll-comment-${c.id}`, "issue_comment");
     if (!fresh) continue;
 

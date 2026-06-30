@@ -10,6 +10,7 @@ import {
   getEnabledRepo,
   hasReviewTask,
   getOctokit,
+  isAgentComment,
   loadEnv,
   logger,
   setTaskPrAndState,
@@ -379,12 +380,14 @@ export async function ingest(n: Normalized): Promise<IngestResult> {
     return maybeResolveConflict(repo, subject, n.senderLogin);
   }
 
-  // Branch 1: a comment or review on an issue/PR I'm assigned to.
+  // Branch 1: a comment or review on an issue/PR I'm assigned to. A human
+  // follow-up from the agent's own account still triggers; only the agent's own
+  // posts (carrying the marker) are skipped to avoid a self-loop.
   if (n.comment) {
     if (!subject.assignees.includes(me))
       return { status: "ignored", reason: "not-assigned-to-me" };
-    if (n.comment.authorLogin === me)
-      return { status: "ignored", reason: "own-comment" }; // avoid self-loop
+    if (isAgentComment(n.comment.body))
+      return { status: "ignored", reason: "agent-comment" };
     return startDraft(repo, subject, n.comment.authorLogin, n.comment.htmlUrl || null);
   }
 

@@ -9,6 +9,20 @@ export function getOctokit(): Octokit {
   return octokit;
 }
 
+/**
+ * Invisible marker appended to every comment the agent posts. GitHub renders an
+ * HTML comment as nothing, so it's hidden in the UI but preserved in the stored
+ * body. The comment-trigger guards skip comments carrying this marker, which lets
+ * a human follow-up posted from the SAME account as the agent still trigger a run
+ * while the agent's own summaries/reviews/failures never re-trigger themselves.
+ */
+export const AGENT_COMMENT_MARKER = "<!-- kotx:agent-comment -->";
+
+/** True if a comment body was authored by the agent (carries the marker). */
+export function isAgentComment(body: string): boolean {
+  return body.includes(AGENT_COMMENT_MARKER);
+}
+
 export function splitRepo(fullName: string): [string, string] {
   const idx = fullName.indexOf("/");
   if (idx < 0) throw new Error(`Invalid repo full name: ${fullName}`);
@@ -40,7 +54,8 @@ export async function postIssueComment(
     owner,
     repo,
     issue_number: issueNumber,
-    body,
+    // stamp so the comment-trigger guards don't re-trigger on the agent's own posts
+    body: `${body}\n\n${AGENT_COMMENT_MARKER}`,
   });
   return res.data.id;
 }
