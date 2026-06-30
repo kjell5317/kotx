@@ -1,6 +1,7 @@
 import {
   getOctokit,
   hasAnyTask,
+  findTasksTrackingAnyPr,
   loadRepos,
   logger,
   recordDelivery,
@@ -9,7 +10,13 @@ import {
 } from "@kotx/shared";
 import type { Octokit } from "@octokit/rest";
 import type { NormalizedSubject } from "./extract.js";
-import { maybeResolveConflict, startDraft, startReview } from "./pipeline.js";
+import {
+  maybeResolveConflict,
+  reconcileTrackedPr,
+  reconcileWaitingPrs,
+  startDraft,
+  startReview,
+} from "./pipeline.js";
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_SEC ?? 30) * 1000;
 // On startup (or after the cursor is lost) look back this far for comments so a
@@ -43,9 +50,24 @@ async function pollRepo(repo: RepoConfig): Promise<void> {
   const octokit = getOctokit();
   const [owner, name] = splitRepo(repo.full_name);
   const me = repo.assignee_login;
+  await reconcileWaitingPrs(repo);
+  await reconcileInReview(repo);
   await pollIssues(octokit, owner, name, repo, me);
   await pollPulls(octokit, owner, name, repo, me);
   await pollComments(octokit, owner, name, repo, me);
+}
+
+async function reconcileInReview(repo: RepoConfig): Promise<void> {
+  const tasks = await findTasksTrackingAnyPr(repo.full_name);
+  const seen = new Set<number>();
+  for (const task of tasks) {
+    const prNumber =
+      task.pr_number ??
+      (task.subject_type === "pull_request" ? task.subject_number : null);
+    if (!prNumber || seen.has(prNumber)) continue;
+    seen.add(prNumber);
+    await reconcileTrackedPr(repo, prNumber);
+  }
 }
 
 function logins(
@@ -113,6 +135,7 @@ async function pollPulls(
       body: pr.body ?? "",
       headRef: pr.head?.ref,
       headRepoFullName: pr.head?.repo?.full_name ?? undefined,
+      baseRef: pr.base?.ref,
     };
     const seen = await hasAnyTask(repo.full_name, "pull_request", pr.number);
     if (subject.requestedReviewers.includes(me)) {

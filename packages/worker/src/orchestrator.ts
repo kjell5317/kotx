@@ -82,7 +82,6 @@ const STATE_WORD: Record<string, string> = {
   awaiting_external: "pushed",
   done: "completed",
   failed: "failed",
-  timed_out: "timed out",
   cancelled: "cancelled",
 };
 
@@ -140,7 +139,6 @@ function defaultCommitMsg(task: Task): string {
 
 /** Map a non-completed outcome to the terminal task state. */
 function failureState(outcome: RunOutcome): TaskState {
-  if (outcome === "timed_out") return "timed_out";
   if (outcome === "cancelled") return "cancelled";
   return "failed";
 }
@@ -227,7 +225,11 @@ async function runDraft(ctx: RunCtx): Promise<void> {
     await setTaskState(ctx.task.id, "draft");
   } else {
     ctx.setReason(describeRunFailure(outcome, guarded.exitCode));
-    await setTaskState(ctx.task.id, failureState(outcome));
+    await setTaskState(
+      ctx.task.id,
+      failureState(outcome),
+      describeRunFailure(outcome, guarded.exitCode),
+    );
   }
   await removeWorktree(ctx.repoFullName, ctx.worktreePath);
 }
@@ -254,7 +256,7 @@ async function runResolveConflict(ctx: RunCtx, merge: MergeResult): Promise<void
     if (merge.advanced)
       await pushBranch(ctx.repoFullName, ctx.branch, gitToken());
     await finishRun(ctx.runId, { outcome: "completed", exitCode: 0, resultMd: null });
-    await setTaskState(ctx.task.id, merge.advanced ? "awaiting_external" : "done");
+    await setTaskState(ctx.task.id, "awaiting_external");
     await removeWorktree(ctx.repoFullName, ctx.worktreePath);
     return;
   }
@@ -288,7 +290,11 @@ async function runReview(ctx: RunCtx): Promise<void> {
     await setTaskState(ctx.task.id, "awaiting_approval");
   } else {
     ctx.setReason(describeRunFailure(outcome, guarded.exitCode));
-    await setTaskState(ctx.task.id, failureState(outcome));
+    await setTaskState(
+      ctx.task.id,
+      failureState(outcome),
+      describeRunFailure(outcome, guarded.exitCode),
+    );
   }
   await removeWorktree(ctx.repoFullName, ctx.worktreePath);
 }
@@ -316,7 +322,11 @@ async function finalizeWrite(
 
   if (outcome !== "completed") {
     ctx.setReason(describeRunFailure(outcome, guarded.exitCode));
-    await setTaskState(ctx.task.id, failureState(outcome));
+    await setTaskState(
+      ctx.task.id,
+      failureState(outcome),
+      describeRunFailure(outcome, guarded.exitCode),
+    );
     if (outcome !== "cancelled")
       await postFailureComment(
         ctx.octokit,
@@ -333,7 +343,7 @@ async function finalizeWrite(
   if (markers.length) {
     const reason = `unresolved merge conflict markers in: ${markers.slice(0, 20).join(", ")}`;
     ctx.setReason(reason);
-    await setTaskState(ctx.task.id, "failed");
+    await setTaskState(ctx.task.id, "failed", reason);
     await postFailureComment(
       ctx.octokit,
       ctx.repoFullName,
@@ -389,7 +399,7 @@ export async function processJob(job: TaskJob): Promise<void> {
   }
   const repo = getEnabledRepo(task.repo_full_name);
   if (!repo) {
-    await setTaskState(task.id, "failed");
+    await setTaskState(task.id, "failed", "repository is not enabled");
     return;
   }
 
@@ -428,7 +438,7 @@ export async function processJob(job: TaskJob): Promise<void> {
 
   try {
     if (await isCancelled(task.id)) {
-      await setTaskState(task.id, "cancelled");
+      await setTaskState(task.id, "cancelled", "cancelled before the run started");
       return;
     }
 
@@ -468,7 +478,7 @@ export async function processJob(job: TaskJob): Promise<void> {
       if (isFork && isWriteKind) {
         failureReason = "this PR is from a fork — its branch can't be pushed to";
         await finishRun(run.id, { outcome: "failed", exitCode: null, resultMd: null });
-        await setTaskState(task.id, "failed");
+        await setTaskState(task.id, "failed", failureReason);
         await postFailureComment(
           octokit,
           task.repo_full_name,
@@ -529,7 +539,7 @@ export async function processJob(job: TaskJob): Promise<void> {
   } catch (err) {
     logger.error({ err, taskId: task.id }, "job failed");
     failureReason = err instanceof Error ? err.message : String(err);
-    await setTaskState(task.id, "failed").catch(() => {});
+    await setTaskState(task.id, "failed", failureReason).catch(() => {});
     await removeWorktree(task.repo_full_name, worktreePath).catch(() => {});
   } finally {
     if (started) {
@@ -537,7 +547,7 @@ export async function processJob(job: TaskJob): Promise<void> {
       const state = fresh?.state ?? "failed";
       // include the failure reason in the message so the push notification is
       // actionable (e.g. "Codex exited with code 1", "the run timed out").
-      const isFailed = state === "failed" || state === "timed_out";
+      const isFailed = state === "failed";
       const message =
         isFailed && failureReason
           ? `${task.repo_full_name} — ${failureReason}`

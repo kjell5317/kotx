@@ -14,6 +14,7 @@ import type {
 // The states that hold the single active slot per (repo, subject). Mirrors the
 // partial unique index `uq_one_active_task` (migration 1700000003000).
 const ACTIVE_STATE_SQL = `('drafting','draft','queued','running','awaiting_approval')`;
+const TERMINAL_STATE_SQL = `('done','failed','cancelled')`;
 
 const { Pool } = pg;
 
@@ -227,10 +228,12 @@ export async function addRun(
 export async function setTaskState(
   id: number,
   state: TaskState,
+  reason: string | null = null,
 ): Promise<void> {
-  await getPool().query(`UPDATE tasks SET state = $2 WHERE id = $1`, [
+  await getPool().query(`UPDATE tasks SET state = $2, state_reason = $3 WHERE id = $1`, [
     id,
     state,
+    reason,
   ]);
 }
 
@@ -251,6 +254,80 @@ export async function setTaskPr(id: number, prNumber: number): Promise<void> {
   ]);
 }
 
+export async function setTaskPrAndState(
+  id: number,
+  prNumber: number,
+  state: TaskState,
+): Promise<void> {
+  await getPool().query(
+    `UPDATE tasks SET pr_number = $2, state = $3, state_reason = NULL WHERE id = $1`,
+    [id, prNumber, state],
+  );
+}
+
+export async function findTasksWaitingOnPr(repoFullName: string): Promise<Task[]> {
+  const res = await getPool().query<Task>(
+    `SELECT * FROM tasks
+     WHERE repo_full_name = $1
+       AND kind = 'implement'
+       AND branch_name IS NOT NULL
+       AND pr_number IS NULL
+       AND state = 'awaiting_external'`,
+    [repoFullName],
+  );
+  return res.rows;
+}
+
+export async function findOpenPrTask(
+  repoFullName: string,
+  prNumber: number,
+): Promise<Task | undefined> {
+  const res = await getPool().query<Task>(
+    `SELECT * FROM tasks
+     WHERE repo_full_name = $1
+       AND (
+         pr_number = $2
+         OR (subject_type = 'pull_request' AND subject_number = $2)
+       )
+       AND state::text NOT IN ${TERMINAL_STATE_SQL}
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [repoFullName, prNumber],
+  );
+  return res.rows[0];
+}
+
+export async function findTasksTrackingPr(
+  repoFullName: string,
+  prNumber: number,
+): Promise<Task[]> {
+  const res = await getPool().query<Task>(
+    `SELECT * FROM tasks
+     WHERE repo_full_name = $1
+       AND (
+         (subject_type = 'pull_request' AND subject_number = $2)
+         OR pr_number = $2
+       )
+       AND state::text NOT IN ${TERMINAL_STATE_SQL}`,
+    [repoFullName, prNumber],
+  );
+  return res.rows;
+}
+
+export async function findTasksTrackingAnyPr(repoFullName: string): Promise<Task[]> {
+  const res = await getPool().query<Task>(
+    `SELECT * FROM tasks
+     WHERE repo_full_name = $1
+       AND (
+         pr_number IS NOT NULL
+         OR subject_type = 'pull_request'
+       )
+       AND state::text NOT IN ${TERMINAL_STATE_SQL}`,
+    [repoFullName],
+  );
+  return res.rows;
+}
+
 /**
  * Move a subject's active tasks to a terminal state — e.g. when its PR is
  * merged/closed (Branch lifecycle). Only touches non-terminal rows.
@@ -260,12 +337,13 @@ export async function closeSubjectTasks(
   subjectType: SubjectType,
   subjectNumber: number,
   state: Extract<TaskState, "done" | "cancelled">,
+  reason: string | null = null,
 ): Promise<number> {
   const res = await getPool().query(
-    `UPDATE tasks SET state = $4
+    `UPDATE tasks SET state = $4, state_reason = $5
      WHERE repo_full_name = $1 AND subject_type = $2 AND subject_number = $3
-       AND state::text NOT IN ('done','failed','cancelled','timed_out','discarded')`,
-    [repoFullName, subjectType, subjectNumber, state],
+       AND state::text NOT IN ${TERMINAL_STATE_SQL}`,
+    [repoFullName, subjectType, subjectNumber, state, reason],
   );
   return res.rowCount ?? 0;
 }
@@ -290,7 +368,7 @@ export async function listTasks(
 ): Promise<TaskListItem[]> {
   const where =
     scope === "active"
-      ? `WHERE t.state::text NOT IN ('done','failed','cancelled','timed_out','discarded')`
+      ? `WHERE t.state::text NOT IN ${TERMINAL_STATE_SQL}`
       : ``;
   const res = await getPool().query<TaskListItem>(
     `SELECT t.*,

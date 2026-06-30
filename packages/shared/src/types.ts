@@ -15,16 +15,12 @@ export type TaskState =
   | "awaiting_external" // my changes are pushed; waiting on others to review/merge
   | "done"
   | "failed"
-  | "cancelled"
-  | "timed_out"
-  | "discarded"; // dismissed by me from the frontend; hidden from "active"
+  | "cancelled";
 
 export const TERMINAL_STATES: ReadonlySet<TaskState> = new Set<TaskState>([
   "done",
   "failed",
   "cancelled",
-  "timed_out",
-  "discarded",
 ]);
 
 // States that occupy the single active slot per (repo, subject). awaiting_external
@@ -57,10 +53,6 @@ export function displayStatus(state: TaskState): string {
       return "failed";
     case "cancelled":
       return "cancelled";
-    case "timed_out":
-      return "timed out";
-    case "discarded":
-      return "discarded";
   }
 }
 
@@ -84,6 +76,7 @@ export interface Task {
   kind: TaskKind;
   role: TaskRole;
   state: TaskState;
+  state_reason: string | null;
   branch_name: string | null;
   pr_number: number | null;
   triggered_by: string;

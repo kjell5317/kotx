@@ -52,6 +52,8 @@ function githubUrl(repo: string, subjectType: string, subjectNumber: number): st
 }
 
 function taskDto(t: TaskListItem) {
+  const inExternal = t.state === "awaiting_external";
+  const hasKnownPr = t.pr_number !== null || t.subject_type === "pull_request";
   return {
     id: t.id,
     repo: t.repo_full_name,
@@ -60,8 +62,14 @@ function taskDto(t: TaskListItem) {
     kind: t.kind,
     role: t.role,
     state: t.state,
-    status: displayStatus(t.state),
+    status: inExternal
+      ? hasKnownPr
+        ? "in review"
+        : "waiting on PR"
+      : displayStatus(t.state),
+    stateReason: t.state_reason,
     branch: t.branch_name,
+    prNumber: t.pr_number,
     triggeredBy: t.triggered_by,
     outcome: t.outcome,
     attempt: t.attempt,
@@ -217,7 +225,8 @@ export function registerApi(app: FastifyInstance): void {
     return { ok: true };
   });
 
-  // Branch 3: approve the review → post REVIEW.md to the PR.
+  // Branch 3: approve the review → post REVIEW.md to the PR, then wait for the
+  // PR lifecycle to finish.
   app.post("/api/tasks/:id/approve", async (req, reply) => {
     if (!requireAuth(req, reply)) return;
     const id = parseId(req, reply);
@@ -229,7 +238,7 @@ export function registerApi(app: FastifyInstance): void {
     const review = await readTaskArtifact(id, "REVIEW.md");
     if (review === null) return reply.code(404).send({ error: "no REVIEW.md to post" });
     await postIssueComment(getOctokit(), task.repo_full_name, task.subject_number, review);
-    await setTaskState(id, "done");
+    await setTaskState(id, "awaiting_external");
     logger.info({ taskId: id }, "review approved and posted");
     return { ok: true };
   });
@@ -245,7 +254,7 @@ export function registerApi(app: FastifyInstance): void {
     await setCancelFlag(id);
     // pre-execution states have no container to kill — terminate directly.
     if (task.state === "queued" || task.state === "draft" || task.state === "drafting")
-      await setTaskState(id, "cancelled");
+      await setTaskState(id, "cancelled", "stopped from the API");
     logger.info({ taskId: id }, "stop requested from API");
     return { ok: true };
   });
@@ -262,7 +271,7 @@ export function registerApi(app: FastifyInstance): void {
     if (TERMINAL_STATES.has(task.state))
       return reply.code(409).send({ error: `task already ${task.state}` });
     await setCancelFlag(id);
-    await setTaskState(id, "discarded");
+    await setTaskState(id, "cancelled", "discarded from the API");
     logger.info({ taskId: id }, "task discarded from API");
     return { ok: true };
   });

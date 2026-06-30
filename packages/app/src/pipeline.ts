@@ -4,10 +4,15 @@ import {
   createTaskWithRun,
   enqueueTask,
   findActiveTask,
+  findTasksTrackingPr,
+  findTasksWaitingOnPr,
+  findOpenPrTask,
   getEnabledRepo,
   getOctokit,
   loadEnv,
   logger,
+  setTaskPrAndState,
+  setTaskState,
   splitRepo,
   type JobPhase,
   type RepoConfig,
@@ -195,6 +200,101 @@ async function isConflicting(repo: RepoConfig, prNumber: number): Promise<boolea
   return false; // never settled — treat as not-conflicting (re-checked on next event)
 }
 
+function prCloseReason(prNumber: number): string {
+  return `PR #${prNumber} was closed without merging`;
+}
+
+export async function markPrOpened(
+  repo: RepoConfig,
+  prNumber: number,
+  headRef: string | undefined,
+  headRepoFullName: string | undefined,
+  baseRef: string | undefined = repo.default_branch,
+): Promise<number> {
+  if (!headRef || headRepoFullName !== repo.full_name) return 0;
+  if (baseRef !== repo.default_branch) return 0;
+  const waiting = await findTasksWaitingOnPr(repo.full_name);
+  let updated = 0;
+  for (const task of waiting) {
+    if (task.branch_name !== headRef) continue;
+    await setTaskPrAndState(task.id, prNumber, "awaiting_external");
+    updated++;
+  }
+  return updated;
+}
+
+export async function markPrClosed(
+  repo: RepoConfig,
+  prNumber: number,
+  merged: boolean,
+): Promise<number> {
+  const tasks = await findTasksTrackingPr(repo.full_name, prNumber);
+  let updated = 0;
+  for (const task of tasks) {
+    await setTaskState(
+      task.id,
+      merged ? "done" : "cancelled",
+      merged ? null : prCloseReason(prNumber),
+    );
+    updated++;
+  }
+
+  const closed = await closeSubjectTasks(
+    repo.full_name,
+    "pull_request",
+    prNumber,
+    merged ? "done" : "cancelled",
+    merged ? null : prCloseReason(prNumber),
+  );
+  return updated + closed;
+}
+
+export async function reconcileWaitingPrs(repo: RepoConfig): Promise<number> {
+  const waiting = await findTasksWaitingOnPr(repo.full_name);
+  if (waiting.length === 0) return 0;
+  const [owner, name] = splitRepo(repo.full_name);
+  const octokit = getOctokit();
+  let updated = 0;
+  for (const task of waiting) {
+    if (!task.branch_name) continue;
+    const prs = await octokit.pulls.list({
+      owner,
+      repo: name,
+      state: "open",
+      head: `${owner}:${task.branch_name}`,
+      base: repo.default_branch,
+      per_page: 10,
+    });
+    const pr = prs.data.find(
+      (p) =>
+        p.head?.ref === task.branch_name &&
+        p.head?.repo?.full_name === repo.full_name &&
+        p.base?.ref === repo.default_branch,
+    );
+    if (!pr) continue;
+    await setTaskPrAndState(task.id, pr.number, "awaiting_external");
+    updated++;
+  }
+  return updated;
+}
+
+export async function reconcileTrackedPr(
+  repo: RepoConfig,
+  prNumber: number,
+): Promise<boolean> {
+  const existing = await findOpenPrTask(repo.full_name, prNumber);
+  if (!existing) return false;
+  const [owner, name] = splitRepo(repo.full_name);
+  const { data } = await getOctokit().pulls.get({
+    owner,
+    repo: name,
+    pull_number: prNumber,
+  });
+  if (data.state === "open") return false;
+  await markPrClosed(repo, prNumber, !!data.merged);
+  return true;
+}
+
 // ── ingestion ───────────────────────────────────────────────────────────────
 
 export async function ingest(n: Normalized): Promise<IngestResult> {
@@ -202,13 +302,28 @@ export async function ingest(n: Normalized): Promise<IngestResult> {
   if (!repo) return { status: "ignored", reason: "repo-not-enabled" };
   const me = repo.assignee_login;
 
-  // Lifecycle: a closed/merged PR ends its open tasks.
-  if (n.event === "pull_request" && n.action === "closed" && n.subject) {
-    const closed = await closeSubjectTasks(
-      repo.full_name,
-      "pull_request",
+  // Lifecycle: PRs opened from pushed issue branches move those tasks to review;
+  // closed/merged PRs end issue-origin and PR-origin tasks that track them.
+  if (
+    n.event === "pull_request" &&
+    ["opened", "reopened"].includes(n.action) &&
+    n.subject
+  ) {
+    const updated = await markPrOpened(
+      repo,
       n.subject.number,
-      n.subject.merged ? "done" : "cancelled",
+      n.subject.headRef,
+      n.subject.headRepoFullName,
+      n.subject.baseRef,
+    );
+    if (updated > 0) return { status: "handled", action: `pr-opened:${updated}` };
+  }
+
+  if (n.event === "pull_request" && n.action === "closed" && n.subject) {
+    const closed = await markPrClosed(
+      repo,
+      n.subject.number,
+      !!n.subject.merged,
     );
     return { status: "handled", action: `closed:${closed}` };
   }
@@ -287,6 +402,7 @@ async function rescanConflicts(
       body: pr.body ?? "",
       headRef: pr.head?.ref,
       headRepoFullName: pr.head?.repo?.full_name ?? undefined,
+      baseRef: pr.base?.ref,
     };
     const res = await maybeResolveConflict(repo, subject, me);
     if (res.status === "enqueued") enqueued++;
