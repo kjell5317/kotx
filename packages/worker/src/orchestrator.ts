@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  acquireRepoLock,
+  acquireRepoSlot,
   clearCancelFlag,
   enqueueTask,
   finishRun,
@@ -15,7 +15,8 @@ import {
   loadEnv,
   logger,
   markRunStarted,
-  releaseRepoLock,
+  maxWorkersForRepo,
+  releaseRepoSlot,
   runDirFor,
   setTaskBranch,
   setTaskState,
@@ -380,11 +381,23 @@ export async function processJob(job: TaskJob): Promise<void> {
   const lockTtl =
     loadDefaults().timeouts.task_wall_clock_sec +
     loadDefaults().timeouts.repo_lock_buffer_sec;
-  const gotLock = await acquireRepoLock(task.repo_full_name, holderId, lockTtl);
-  if (!gotLock) {
-    await enqueueTask({ ...job });
-    logger.debug({ repo: task.repo_full_name }, "repo busy; requeued");
-    await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+  const maxSlots = maxWorkersForRepo(repo);
+  const slot = await acquireRepoSlot(
+    task.repo_full_name,
+    holderId,
+    maxSlots,
+    lockTtl,
+  );
+  if (slot === null) {
+    // Repo at capacity. Re-enqueue this run with a delay and a FRESH job id —
+    // re-adding `run-<id>` while the current job is still active would be
+    // de-duplicated by BullMQ and silently dropped (the old clog bug). Return
+    // immediately so this worker slot is freed for other repos.
+    await enqueueTask(job, {
+      jobId: `run-${run.id}-retry-${Date.now()}`,
+      delayMs: RETRY_DELAY_MS,
+    });
+    logger.debug({ repo: task.repo_full_name, maxSlots }, "repo busy; requeued");
     return;
   }
 
@@ -507,7 +520,7 @@ export async function processJob(job: TaskJob): Promise<void> {
         url: notifyUrl(task),
       }).catch(() => {});
     }
-    await releaseRepoLock(task.repo_full_name, holderId).catch(() => {});
+    await releaseRepoSlot(task.repo_full_name, slot, holderId).catch(() => {});
     await clearCancelFlag(task.id).catch(() => {});
   }
 }

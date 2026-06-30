@@ -38,9 +38,9 @@ Verified end-to-end on `TUM-Social-AI/AflaConnect` during bring-up:
   Tasks flow `queued → running → done/failed`.
 - **GitHub auth via PAT.** All REST + git-over-HTTPS uses a personal access
   token; the agent acts as the user (commits, pushes, comments are yours).
-- **Per-repo locking + worktrees.** The worker takes a Redis repo lock, fetches
-  the bare mirror, and creates an isolated git worktree. Branch creation is
-  idempotent across retries (`git worktree add -B`).
+- **Per-repo locking + worktrees.** The worker takes one of N Redis repo slots
+  (`max_workers_per_repo`), fetches the bare mirror, and creates an isolated git
+  worktree. Branch creation is idempotent across retries (`git worktree add -B`).
 - **Codex actually runs.** Inside the runner container Codex authenticates,
   resolves git, has network + root, and `node`/`python`/`uv` available; it
   inspects the repo, makes changes, and writes a summary (`AGENT_RESULT.md`) and
@@ -73,9 +73,11 @@ Ordered roughly by priority:
    in-memory with a 1h startup lookback; comments during a >1h outage can be
    missed (labels can't be — they're level-triggered). Persist the cursor in a
    small table to close the gap.
-4. **Per-repo concurrency > 1.** The repo lock is a single slot
-   (`max_workers_per_repo` effectively 1). Use N lock slots if you want parallel
-   tasks per repo.
+4. **Per-repo concurrency.** Done: a counting semaphore over N Redis slot keys
+   (`acquireRepoSlot`) honors `max_workers_per_repo`. A busy repo re-enqueues the
+   run with a delay and a fresh job id (re-adding the same id would be
+   de-duplicated by BullMQ and dropped); slot keys carry a TTL so a crashed run
+   frees its slot. (Still bounded by `max_global_workers`.)
 5. **Re-run / force-push edge case.** Re-running implement on an issue whose
    branch already exists resets the local branch to base (`-B`) and publishes
    with `--force-with-lease` on worker-owned issue branches. PR-review pushes
