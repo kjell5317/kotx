@@ -58,9 +58,9 @@ async function ensureImage(dk: Docker, image: string): Promise<void> {
 }
 
 // Per-run names for the optional dev-container (DinD) sidecar.
-const dindName = (runId: number) => `kotx-dind-${runId}`;
-const dindNetwork = (runId: number) => `kotx-run-${runId}`;
-const dindVolume = (runId: number) => `kotx-dind-${runId}`;
+export const dindName = (runId: number) => `kotx-dind-${runId}`;
+export const dindNetwork = (runId: number) => `kotx-run-${runId}`;
+export const dindVolume = (runId: number) => `kotx-dind-${runId}`;
 // Hostname the runner uses to reach the sidecar daemon (network alias).
 const DIND_HOST = "dind";
 

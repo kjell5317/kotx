@@ -383,6 +383,12 @@ export interface TaskListItem extends Task {
   finished_at: Date | null;
 }
 
+export interface GcRunCandidate {
+  id: number;
+  task_id: number;
+  finished_at: Date;
+}
+
 /**
  * Tasks joined with their latest run, newest first. scope='active' returns only
  * tasks that still need attention (non-terminal); 'all' returns everything.
@@ -428,6 +434,67 @@ export async function getLatestRun(
     [taskId],
   );
   return res.rows[0];
+}
+
+/** Run ids whose task/run state says the worker may still need live resources. */
+export async function listActiveRunIds(): Promise<number[]> {
+  const res = await getPool().query<{ id: string | number }>(
+    `SELECT DISTINCT r.id
+     FROM task_runs r
+     JOIN tasks t ON t.id = r.task_id
+     WHERE t.state::text IN ${ACTIVE_STATE_SQL}`,
+  );
+  return res.rows.map((r) => Number(r.id));
+}
+
+/** Latest run id per task. These remain frontend-visible even after finishing. */
+export async function listLatestRunIds(): Promise<number[]> {
+  const res = await getPool().query<{ id: string | number }>(
+    `SELECT DISTINCT ON (task_id) id
+     FROM task_runs
+     ORDER BY task_id, attempt DESC`,
+  );
+  return res.rows.map((r) => Number(r.id));
+}
+
+/**
+ * Finished, non-latest runs whose parent task is no longer in an active state.
+ * These are the only run logs/worktrees eligible for garbage collection.
+ */
+export async function listRetainableFinishedNonLatestRuns(): Promise<
+  GcRunCandidate[]
+> {
+  const res = await getPool().query<{
+    id: string | number;
+    task_id: string | number;
+    finished_at: Date;
+  }>(
+    `WITH latest AS (
+       SELECT DISTINCT ON (task_id) id
+       FROM task_runs
+       ORDER BY task_id, attempt DESC
+     )
+     SELECT r.id, r.task_id, r.finished_at
+     FROM task_runs r
+     JOIN tasks t ON t.id = r.task_id
+     LEFT JOIN latest l ON l.id = r.id
+     WHERE r.finished_at IS NOT NULL
+       AND l.id IS NULL
+       AND t.state::text NOT IN ${ACTIVE_STATE_SQL}
+     ORDER BY r.finished_at ASC, r.id ASC`,
+  );
+  return res.rows.map((r) => ({
+    id: Number(r.id),
+    task_id: Number(r.task_id),
+    finished_at: r.finished_at,
+  }));
+}
+
+export async function listFinishedNonLatestRunsOlderThan(
+  cutoff: Date,
+): Promise<GcRunCandidate[]> {
+  const runs = await listRetainableFinishedNonLatestRuns();
+  return runs.filter((run) => run.finished_at < cutoff);
 }
 
 export async function markRunStarted(
