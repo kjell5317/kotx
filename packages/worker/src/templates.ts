@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import Handlebars from "handlebars";
-import type { JobMode } from "@kotx/shared";
 
 const PROMPTS_DIR = process.env.PROMPTS_DIR ?? join(process.cwd(), "prompts");
 
@@ -17,22 +16,33 @@ function template(name: string): HandlebarsTemplateDelegate {
   return t;
 }
 
+// Which prompt file backs each run. "draft" and "implement" are the two phases of
+// a Branch 1 task; "resolve_conflict" and "review" are single-phase.
+export type PromptKind = "draft" | "implement" | "resolve_conflict" | "review";
+
 export interface TaskContext {
   repoFullName: string;
-  subjectType: string;
+  subjectKind: string; // "issue" | "pull request" (human-readable)
   subjectNumber: number;
   branchName: string;
+  defaultBranch: string;
   title: string;
   body: string;
   comments?: Array<{ author: string; location?: string; body: string }>;
   mergeConflicts?: string[];
+  // draft only: differentiates first-assignment from a follow-up.
+  isFollowUp?: boolean;
+  // implement only: the approved TASK.md brief, embedded as the instructions.
+  taskBrief?: string;
 }
 
-const FILE_BY_MODE: Record<JobMode, string> = {
+const FILE_BY_KIND: Record<PromptKind, string> = {
+  draft: "draft.md.hbs",
   implement: "implement.md.hbs",
+  resolve_conflict: "resolve-conflict.md.hbs",
   review: "review.md.hbs",
 };
 
-export function renderTaskMd(mode: JobMode, ctx: TaskContext): string {
-  return template(FILE_BY_MODE[mode])(ctx);
+export function renderPrompt(kind: PromptKind, ctx: TaskContext): string {
+  return template(FILE_BY_KIND[kind])(ctx);
 }

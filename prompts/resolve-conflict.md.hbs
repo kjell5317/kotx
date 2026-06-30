@@ -1,0 +1,51 @@
+# Task: resolve merge conflicts on pull request #{{subjectNumber}}
+
+Repository: {{repoFullName}}
+PR branch (already checked out at /workspace): {{branchName}}
+
+This PR can no longer be merged because the default branch (`{{defaultBranch}}`)
+moved on and now conflicts with it. The default branch has already been merged
+into `{{branchName}}` and the merge is **in progress with conflicts left in the
+working tree** for you to resolve.
+
+{{#if mergeConflicts.length}}
+## Conflicted files
+{{#each mergeConflicts}}
+- {{this}}
+{{/each}}
+{{/if}}
+
+## PR title
+{{title}}
+
+{{#if body}}
+## PR description
+{{body}}
+{{/if}}
+
+## What to do
+
+1. Resolve every conflict by combining both sides correctly — keep the PR's intent
+   **and** the incoming changes from the default branch. Understand each hunk; do
+   not blindly pick one side.
+2. Remove all conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`). None may remain.
+3. Make the result coherent: if a rename/refactor on the default branch touched
+   code this PR also changed, reconcile them so the project still builds.
+4. Do **not** make unrelated changes or add new features — this run only
+   reconciles the merge. Run the project's build/tests where you can to confirm
+   the merge is sound.
+5. Write a one-line note of how you resolved it to `/workspace/AGENT_RESULT.md`
+   and a commit message to `/workspace/COMMIT_MSG.md` (a plain
+   "Merge {{defaultBranch}} into {{branchName}}" subject is fine).
+
+## Working agreement
+
+- Work in `/workspace`. You may run any commands (build, tests, package managers).
+  Network + root are available; Node and Python 3 (with `uv`) are preinstalled.
+- Do not touch git history or remotes — the host finalizes the merge commit and
+  pushes after you finish.
+
+## Voice
+
+Write `AGENT_RESULT.md` in plain, neutral developer voice. Do **not** refer to
+yourself as an AI, an agent, an assistant, or mention automation.

@@ -32,7 +32,7 @@ export function getTaskQueue(): Queue<TaskJob> {
 }
 
 export async function enqueueTask(job: TaskJob): Promise<void> {
-  await getTaskQueue().add(job.mode, job, {
+  await getTaskQueue().add(`${job.kind}:${job.phase}`, job, {
     jobId: `run-${job.taskRunId}`, // idempotent per attempt
   });
 }

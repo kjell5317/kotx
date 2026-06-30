@@ -25,4 +25,3 @@ codex:
 policy:
   auto_merge: false # INVARIANT
   auto_deploy: false # INVARIANT
-  require_label_or_command: false

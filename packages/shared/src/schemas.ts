@@ -27,7 +27,6 @@ export const defaultsSchema = z.object({
     // auto_merge / auto_deploy are invariants — must be false if present.
     auto_merge: z.literal(false).default(false),
     auto_deploy: z.literal(false).default(false),
-    require_label_or_command: z.boolean(),
   }),
 });
 export type Defaults = z.infer<typeof defaultsSchema>;
@@ -39,11 +38,9 @@ export const repoConfigSchema = z.object({
   default_branch: z.string().default("main"),
   assignee_login: z.string(),
   // true = poll this repo (no webhook rights); false = rely on webhooks.
-  // In poll mode the trigger label is removed once a task is enqueued, so the
-  // level-triggered poll doesn't re-fire — re-add the label to re-run.
+  // The poller diffs GitHub state against existing tasks to find new triggers
+  // (assignments, review requests, conflicts) — no labels or commands involved.
   poll: z.boolean().default(false),
-  allow_infra_changes: z.boolean().default(false),
-  allow_secret_access: z.boolean().default(false),
   overrides: z
     .object({
       max_workers_per_repo: z.number().int().positive().optional(),

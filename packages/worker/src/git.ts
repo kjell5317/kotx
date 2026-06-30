@@ -115,6 +115,33 @@ async function resolveRef(mirror: string, ref: string): Promise<string | null> {
 }
 
 /**
+ * List tracked files that still contain conflict markers (`<<<<<<< ` / `>>>>>>> `).
+ * Used as a safety net so an unresolved merge is never committed.
+ */
+export async function findConflictMarkers(
+  worktreePath: string,
+): Promise<string[]> {
+  try {
+    const { stdout } = await run("git", [
+      "-C",
+      worktreePath,
+      "grep",
+      "-lE",
+      "^(<<<<<<< |>>>>>>> )",
+      "--",
+      ".",
+    ]);
+    return stdout
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  } catch {
+    // git grep exits 1 when there are no matches → no markers
+    return [];
+  }
+}
+
+/**
  * Merge the (already-fetched) default branch into the current worktree branch
  * before the agent starts, so it builds on top of the latest main.
  *

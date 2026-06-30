@@ -5,8 +5,13 @@
   "type": "module",
   "main": "./dist/index.js",
   "dependencies": {
+    "@fastify/cors": "^10.0.0",
     "@kotx/shared": "0.1.0",
     "@octokit/webhooks-types": "^7.6.0",
+    "dockerode": "^4.0.0",
     "fastify": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^3.3.0"
   }
 }

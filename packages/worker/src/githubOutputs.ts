@@ -1,9 +1,4 @@
-import {
-  postIssueComment,
-  splitRepo,
-  stripAgentCommands,
-  type SubjectType,
-} from "@kotx/shared";
+import { postIssueComment, splitRepo, type SubjectType } from "@kotx/shared";
 import type { Octokit } from "@octokit/rest";
 
 export interface DiscussionItem {
@@ -43,7 +38,7 @@ async function fetchDiscussion(
     per_page: 100,
   });
   for (const c of conv.data) {
-    const body = stripAgentCommands(c.body ?? "");
+    const body = (c.body ?? "").trim();
     if (body)
       items.push({
         author: c.user?.login ?? "?",
@@ -60,7 +55,7 @@ async function fetchDiscussion(
       per_page: 100,
     });
     for (const r of reviews.data) {
-      const body = stripAgentCommands(r.body ?? "");
+      const body = (r.body ?? "").trim();
       const state = r.state ?? "";
       const meaningful = ["CHANGES_REQUESTED", "APPROVED", "DISMISSED"].includes(
         state,
@@ -81,7 +76,7 @@ async function fetchDiscussion(
       per_page: 100,
     });
     for (const c of inline.data) {
-      const body = stripAgentCommands(c.body ?? "");
+      const body = (c.body ?? "").trim();
       if (!body) continue;
       const line = c.line ?? c.original_line ?? "?";
       items.push({

@@ -1,9 +1,9 @@
 import { loadDefaults, loadEnv, loadRepos, logger, recordDelivery } from "@kotx/shared";
 import Fastify from "fastify";
+import { registerApi } from "./api.js";
 import { normalize } from "./extract.js";
 import { ingest } from "./pipeline.js";
 import { startPoller } from "./poller.js";
-import { registerUi } from "./ui.js";
 import { verifySignature } from "./verify.js";
 
 const env = loadEnv();
@@ -24,8 +24,8 @@ app.addContentTypeParser(
 
 app.get("/healthz", async () => ({ ok: true }));
 
-// runs dashboard + API (GET /, /ui, /api/*) — auth-gated by UI_TOKEN
-registerUi(app);
+// JSON API for the external frontend (GET/POST/PUT /api/*) — Bearer-gated.
+registerApi(app);
 
 app.post("/github/webhook", async (req, reply) => {
   const raw = req.body as Buffer;

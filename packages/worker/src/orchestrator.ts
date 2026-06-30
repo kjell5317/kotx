@@ -16,17 +16,22 @@ import {
   logger,
   markRunStarted,
   releaseRepoLock,
+  runDirFor,
   setTaskBranch,
   setTaskState,
+  taskDirFor,
   TERMINAL_STATES,
+  type RunOutcome,
   type Task,
   type TaskJob,
+  type TaskState,
 } from "@kotx/shared";
 import { ensureFreshAuth } from "./codexAuth.js";
 import {
   addImplementWorktree,
   commitAll,
   ensureMirrorFetched,
+  findConflictMarkers,
   issueBranchName,
   mergeDefaultBranch,
   mirrorPath,
@@ -37,11 +42,17 @@ import {
   fetchSubject,
   postFailureComment,
   postSummary,
+  type SubjectDetails,
 } from "./githubOutputs.js";
 import { notify } from "./notify.js";
-import { classifyOutcome, deleteArtifacts, readArtifacts } from "./outputs.js";
+import {
+  classifyOutcome,
+  deleteArtifacts,
+  readArtifact,
+  readArtifacts,
+} from "./outputs.js";
 import { containerName, killContainer, runCodexContainer } from "./runner.js";
-import { renderTaskMd } from "./templates.js";
+import { renderPrompt, type PromptKind, type TaskContext } from "./templates.js";
 
 const RETRY_DELAY_MS = 5000;
 const CANCEL_POLL_MS = 3000;
@@ -49,6 +60,10 @@ const CANCEL_POLL_MS = 3000;
 function subjectLabel(task: Task): string {
   const kind = task.subject_type === "pull_request" ? "PR" : "Issue";
   return `${kind} #${task.subject_number}`;
+}
+
+function subjectKindWord(task: Task): string {
+  return task.subject_type === "pull_request" ? "pull request" : "issue";
 }
 
 /** Where a notification should deep-link: the triggering comment on a PR if we
@@ -60,7 +75,10 @@ function notifyUrl(task: Task): string {
   return `https://github.com/${task.repo_full_name}/${kind}/${task.subject_number}`;
 }
 
-const OUTCOME_WORD: Record<string, string> = {
+const STATE_WORD: Record<string, string> = {
+  draft: "ready for your review",
+  awaiting_approval: "review ready",
+  awaiting_external: "pushed",
   done: "completed",
   failed: "failed",
   timed_out: "timed out",
@@ -117,6 +135,225 @@ function defaultCommitMsg(task: Task): string {
   return `Changes for #${task.subject_number}\n`;
 }
 
+/** Map a non-completed outcome to the terminal task state. */
+function failureState(outcome: RunOutcome): TaskState {
+  if (outcome === "timed_out") return "timed_out";
+  if (outcome === "cancelled") return "cancelled";
+  return "failed";
+}
+
+// Everything a run handler needs after the worktree is checked out.
+interface RunCtx {
+  task: Task;
+  runId: number;
+  repoFullName: string;
+  defaultBranch: string;
+  octokit: ReturnType<typeof getOctokit>;
+  subject: SubjectDetails;
+  branch: string;
+  worktreePath: string;
+  runOutputDir: string;
+  taskDir: string;
+  containerName: string;
+  mirror: string;
+  // a draft run is a follow-up (new activity) rather than a first assignment
+  followUp: boolean;
+}
+
+/** Render the prompt, write it as PROMPT.md, and run the guarded container. */
+async function runPrompt(
+  ctx: RunCtx,
+  kind: PromptKind,
+  extra: Partial<TaskContext>,
+): Promise<Guarded> {
+  const prompt = renderPrompt(kind, {
+    repoFullName: ctx.repoFullName,
+    subjectKind: subjectKindWord(ctx.task),
+    subjectNumber: ctx.task.subject_number,
+    branchName: ctx.branch,
+    defaultBranch: ctx.defaultBranch,
+    title: ctx.subject.title,
+    body: ctx.subject.body,
+    comments: ctx.subject.comments,
+    ...extra,
+  });
+  await writeFile(join(ctx.runOutputDir, "PROMPT.md"), prompt, "utf8");
+  await ensureFreshAuth();
+  return runWithGuards(
+    ctx.containerName,
+    ctx.worktreePath,
+    ctx.runOutputDir,
+    ctx.mirror,
+    ctx.task.id,
+  );
+}
+
+// ── per-kind run handlers ───────────────────────────────────────────────────
+
+/** Branch 1, draft phase: read-only refinement → TASK.md, then await my start. */
+async function runDraft(ctx: RunCtx): Promise<void> {
+  const guarded = await runPrompt(ctx, "draft", { isFollowUp: ctx.followUp });
+  const taskMd = await readArtifact(ctx.worktreePath, "TASK.md");
+  const outcome = classifyOutcome({
+    exitCode: guarded.exitCode,
+    producedOutput: taskMd !== null,
+    killedByCancel: guarded.killedByCancel,
+    killedByTimeout: guarded.killedByTimeout,
+  });
+  await finishRun(ctx.runId, {
+    outcome,
+    exitCode: guarded.exitCode,
+    resultMd: taskMd,
+  });
+  if (outcome === "completed" && taskMd) {
+    await mkdir(ctx.taskDir, { recursive: true });
+    await writeFile(join(ctx.taskDir, "TASK.md"), taskMd, "utf8");
+    await setTaskState(ctx.task.id, "draft");
+  } else {
+    await setTaskState(ctx.task.id, failureState(outcome));
+  }
+  await removeWorktree(ctx.repoFullName, ctx.worktreePath);
+}
+
+/** Branch 1, execute phase: implement the approved brief, push, comment. */
+async function runImplement(ctx: RunCtx, merge: MergeResult): Promise<void> {
+  const brief =
+    (await readArtifact(ctx.taskDir, "TASK.md")) ??
+    `${ctx.subject.title}\n\n${ctx.subject.body}`;
+  const guarded = await runPrompt(ctx, "implement", {
+    taskBrief: brief,
+    mergeConflicts: merge.conflicted ? merge.files : undefined,
+  });
+  await finalizeWrite(ctx, guarded, merge, {
+    forceWithLease: ctx.task.subject_type === "issue",
+    successState: "awaiting_external",
+  });
+}
+
+/** Branch 2: resolve the in-progress conflicted merge, then push. */
+async function runResolveConflict(ctx: RunCtx, merge: MergeResult): Promise<void> {
+  if (!merge.conflicted) {
+    // Nothing to reconcile (already clean). Push if the merge advanced the branch.
+    if (merge.advanced)
+      await pushBranch(ctx.repoFullName, ctx.branch, gitToken());
+    await finishRun(ctx.runId, { outcome: "completed", exitCode: 0, resultMd: null });
+    await setTaskState(ctx.task.id, merge.advanced ? "awaiting_external" : "done");
+    await removeWorktree(ctx.repoFullName, ctx.worktreePath);
+    return;
+  }
+  const guarded = await runPrompt(ctx, "resolve_conflict", {
+    mergeConflicts: merge.files,
+  });
+  await finalizeWrite(ctx, guarded, merge, {
+    forceWithLease: false,
+    successState: "awaiting_external",
+  });
+}
+
+/** Branch 3: read-only review → REVIEW.md, then await my approval to post it. */
+async function runReview(ctx: RunCtx): Promise<void> {
+  const guarded = await runPrompt(ctx, "review", {});
+  const reviewMd = await readArtifact(ctx.worktreePath, "REVIEW.md");
+  const outcome = classifyOutcome({
+    exitCode: guarded.exitCode,
+    producedOutput: reviewMd !== null,
+    killedByCancel: guarded.killedByCancel,
+    killedByTimeout: guarded.killedByTimeout,
+  });
+  await finishRun(ctx.runId, {
+    outcome,
+    exitCode: guarded.exitCode,
+    resultMd: reviewMd,
+  });
+  if (outcome === "completed" && reviewMd) {
+    await mkdir(ctx.taskDir, { recursive: true });
+    await writeFile(join(ctx.taskDir, "REVIEW.md"), reviewMd, "utf8");
+    await setTaskState(ctx.task.id, "awaiting_approval");
+  } else {
+    await setTaskState(ctx.task.id, failureState(outcome));
+  }
+  await removeWorktree(ctx.repoFullName, ctx.worktreePath);
+}
+
+/** Shared tail for the write-kinds (implement, resolve_conflict): classify,
+ *  guard against leftover conflict markers, commit, push, comment. */
+async function finalizeWrite(
+  ctx: RunCtx,
+  guarded: Guarded,
+  merge: MergeResult,
+  opts: { forceWithLease: boolean; successState: TaskState },
+): Promise<void> {
+  const artifacts = await readArtifacts(ctx.worktreePath);
+  const outcome = classifyOutcome({
+    exitCode: guarded.exitCode,
+    producedOutput: artifacts.resultMd !== null,
+    killedByCancel: guarded.killedByCancel,
+    killedByTimeout: guarded.killedByTimeout,
+  });
+  await finishRun(ctx.runId, {
+    outcome,
+    exitCode: guarded.exitCode,
+    resultMd: artifacts.resultMd,
+  });
+
+  if (outcome !== "completed") {
+    await setTaskState(ctx.task.id, failureState(outcome));
+    if (outcome !== "cancelled")
+      await postFailureComment(
+        ctx.octokit,
+        ctx.repoFullName,
+        ctx.task.subject_number,
+        outcome === "timed_out" ? "the run timed out" : "the run failed",
+      );
+    await removeWorktree(ctx.repoFullName, ctx.worktreePath);
+    return;
+  }
+
+  // safety net: never commit unresolved merge conflicts
+  const markers = await findConflictMarkers(ctx.worktreePath);
+  if (markers.length) {
+    await setTaskState(ctx.task.id, "failed");
+    await postFailureComment(
+      ctx.octokit,
+      ctx.repoFullName,
+      ctx.task.subject_number,
+      `unresolved merge conflict markers remain in: ${markers.slice(0, 20).join(", ")}`,
+    );
+    await removeWorktree(ctx.repoFullName, ctx.worktreePath);
+    return;
+  }
+
+  const msgFile = join(ctx.runOutputDir, "COMMIT_MSG.txt");
+  await writeFile(
+    msgFile,
+    artifacts.commitMsg ?? defaultCommitMsg(ctx.task),
+    "utf8",
+  );
+  await deleteArtifacts(ctx.worktreePath);
+  const committed = await commitAll(ctx.worktreePath, msgFile);
+  if (committed || merge.advanced) {
+    await pushBranch(ctx.repoFullName, ctx.branch, gitToken(), {
+      forceWithLease: opts.forceWithLease,
+    });
+  }
+
+  const summary = artifacts.resultMd ?? "Done.";
+  const isIssue = ctx.task.subject_type === "issue";
+  const body =
+    isIssue && committed
+      ? `${summary}\n\nChanges pushed to \`${ctx.branch}\`.`
+      : summary;
+  await postSummary(ctx.octokit, ctx.repoFullName, ctx.task.subject_number, body);
+  await setTaskState(ctx.task.id, opts.successState);
+  await removeWorktree(ctx.repoFullName, ctx.worktreePath);
+}
+
+interface MergeResult {
+  conflicted: boolean;
+  files: string[];
+  advanced: boolean;
+}
+
 export async function processJob(job: TaskJob): Promise<void> {
   const env = loadEnv();
   const task = await getTask(job.taskId);
@@ -148,11 +385,11 @@ export async function processJob(job: TaskJob): Promise<void> {
   }
 
   const worktreePath = run.worktree_path;
-  const runOutputDir = join(env.agentDataDir, "runs", String(run.id));
-  // Behavior is decided by the SUBJECT, not how it was triggered: a PR always
-  // uses its own head branch (never invent a branch), an issue gets a fresh one.
+  const runOutputDir = runDirFor(env.agentDataDir, run.id);
   const isPr = task.subject_type === "pull_request";
   const name = containerName(run.id);
+  const isWriteKind =
+    job.kind === "resolve_conflict" || (job.kind === "implement" && job.phase === "execute");
   let started = false;
 
   try {
@@ -161,7 +398,7 @@ export async function processJob(job: TaskJob): Promise<void> {
       return;
     }
 
-    await setTaskState(task.id, "running");
+    await setTaskState(task.id, job.phase === "draft" ? "drafting" : "running");
     await markRunStarted(run.id, name, join(runOutputDir, "codex.jsonl"));
     await mkdir(runOutputDir, { recursive: true });
     await notify({
@@ -180,22 +417,22 @@ export async function processJob(job: TaskJob): Promise<void> {
       task.subject_number,
     );
 
-    // Decide the branch to work on + where to start it from.
-    //  - issue  → a fresh GitHub-style branch off the default branch
-    //  - PR     → the PR's own head branch (so pushes update the PR)
+    // Decide the branch + start ref. Issues get a fresh GitHub-style branch off
+    // the default branch; PRs use their own head branch. Fork PRs can't be pushed
+    // to, so write-kinds bail; the read-only review reads the fork's head via the
+    // mirror's refs/pull/* namespace.
     let branch: string;
-    let startRef: string;
-    if (isPr) {
+    let baseSuffix: string;
+    if (!isPr) {
+      branch = issueBranchName(task.subject_number, subject.title);
+      baseSuffix = repo.default_branch;
+    } else {
       if (!subject.headRef) throw new Error("PR has no head ref");
-      if (
-        subject.headRepoFullName &&
-        subject.headRepoFullName !== task.repo_full_name
-      ) {
-        await finishRun(run.id, {
-          outcome: "failed",
-          exitCode: null,
-          resultMd: null,
-        });
+      const isFork =
+        !!subject.headRepoFullName &&
+        subject.headRepoFullName !== task.repo_full_name;
+      if (isFork && isWriteKind) {
+        await finishRun(run.id, { outcome: "failed", exitCode: null, resultMd: null });
         await setTaskState(task.id, "failed");
         await postFailureComment(
           octokit,
@@ -205,113 +442,52 @@ export async function processJob(job: TaskJob): Promise<void> {
         );
         return;
       }
-      branch = subject.headRef;
-      startRef = subject.headRef;
-    } else {
-      branch = issueBranchName(task.subject_number, subject.title);
-      startRef = repo.default_branch;
+      branch = isFork ? `review/pr-${task.subject_number}` : subject.headRef;
+      baseSuffix = isFork ? `pull/${task.subject_number}` : subject.headRef;
     }
     await setTaskBranch(task.id, branch);
 
     const token = gitToken();
     await ensureMirrorFetched(task.repo_full_name, token);
     await removeWorktree(task.repo_full_name, worktreePath);
-    await addImplementWorktree(
-      task.repo_full_name,
-      worktreePath,
-      branch,
-      startRef,
-    );
+    await addImplementWorktree(task.repo_full_name, worktreePath, branch, baseSuffix);
 
-    // Merge the latest default branch in before building so the agent works on
-    // top of main. Conflicts are left in place for the agent to resolve.
-    const merge = await mergeDefaultBranch(worktreePath, repo.default_branch);
-    if (merge.conflicted)
-      logger.info(
-        { taskId: task.id, files: merge.files },
-        "merge conflicts left for the agent to resolve",
-      );
-
-    const taskMd = renderTaskMd(isPr ? "review" : "implement", {
+    const ctx: RunCtx = {
+      task,
+      runId: run.id,
       repoFullName: task.repo_full_name,
-      subjectType: task.subject_type,
-      subjectNumber: task.subject_number,
-      branchName: branch,
-      title: subject.title,
-      body: subject.body,
-      comments: subject.comments,
-      mergeConflicts: merge.conflicted ? merge.files : undefined,
-    });
-    await writeFile(join(runOutputDir, "TASK.md"), taskMd, "utf8");
-
-    await ensureFreshAuth();
-    const guarded = await runWithGuards(
-      name,
+      defaultBranch: repo.default_branch,
+      octokit,
+      subject,
+      branch,
       worktreePath,
       runOutputDir,
-      mirrorPath(task.repo_full_name),
-      task.id,
-    );
+      taskDir: taskDirFor(env.agentDataDir, task.id),
+      containerName: name,
+      mirror: mirrorPath(task.repo_full_name),
+      // a draft is a follow-up if the task already had a previous run
+      followUp: run.attempt > 1,
+    };
 
-    const artifacts = await readArtifacts(worktreePath);
-    const outcome = classifyOutcome({
-      exitCode: guarded.exitCode,
-      artifacts,
-      killedByCancel: guarded.killedByCancel,
-      killedByTimeout: guarded.killedByTimeout,
-    });
-    await finishRun(run.id, {
-      outcome,
-      exitCode: guarded.exitCode,
-      resultMd: artifacts.resultMd,
-    });
-    logger.info({ taskId: task.id, runId: run.id, outcome }, "run finished");
-
-    if (outcome === "completed") {
-      // commit + push the branch (if there are changes), then post a summary.
-      // No PR is ever opened.
-      const msgFile = join(runOutputDir, "COMMIT_MSG.txt");
-      await writeFile(
-        msgFile,
-        artifacts.commitMsg ?? defaultCommitMsg(task),
-        "utf8",
-      );
-      await deleteArtifacts(worktreePath);
-      const committed = await commitAll(worktreePath, msgFile);
-      // push if the agent committed changes OR the pre-merge advanced the branch
-      if (committed || merge.advanced) {
-        await pushBranch(task.repo_full_name, branch, gitToken(), {
-          forceWithLease: task.subject_type === "issue",
-        });
-      }
-
-      const summary = artifacts.resultMd ?? "Done.";
-      const body =
-        !isPr && committed
-          ? `${summary}\n\nChanges pushed to \`${branch}\`.`
-          : summary;
-      await postSummary(octokit, task.repo_full_name, task.subject_number, body);
-      await setTaskState(task.id, "done");
-      await removeWorktree(task.repo_full_name, worktreePath);
-      return;
+    // Only the write-kinds merge the default branch in first. resolve_conflict
+    // expects conflicts; implement-execute wants to build on top of latest main.
+    let merge: MergeResult = { conflicted: false, files: [], advanced: false };
+    if (isWriteKind) {
+      merge = await mergeDefaultBranch(worktreePath, repo.default_branch);
+      if (merge.conflicted)
+        logger.info(
+          { taskId: task.id, files: merge.files },
+          "merge conflicts present",
+        );
     }
 
-    const finalState =
-      outcome === "timed_out"
-        ? "timed_out"
-        : outcome === "cancelled"
-          ? "cancelled"
-          : "failed";
-    await setTaskState(task.id, finalState);
-    if (finalState !== "cancelled") {
-      await postFailureComment(
-        octokit,
-        task.repo_full_name,
-        task.subject_number,
-        finalState === "timed_out" ? "the run timed out" : "the run failed",
-      );
-    }
-    await removeWorktree(task.repo_full_name, worktreePath);
+    if (job.kind === "implement" && job.phase === "draft") await runDraft(ctx);
+    else if (job.kind === "implement") await runImplement(ctx, merge);
+    else if (job.kind === "resolve_conflict") await runResolveConflict(ctx, merge);
+    else if (job.kind === "review") await runReview(ctx);
+    else throw new Error(`unknown job kind: ${job.kind}`);
+
+    logger.info({ taskId: task.id, runId: run.id, kind: job.kind }, "run finished");
   } catch (err) {
     logger.error({ err, taskId: task.id }, "job failed");
     await setTaskState(task.id, "failed").catch(() => {});
@@ -321,7 +497,7 @@ export async function processJob(job: TaskJob): Promise<void> {
       const fresh = await getTask(task.id).catch(() => undefined);
       const state = fresh?.state ?? "failed";
       await notify({
-        title: `${subjectLabel(task)} ${OUTCOME_WORD[state] ?? state}`,
+        title: `${subjectLabel(task)} ${STATE_WORD[state] ?? state}`,
         message: task.repo_full_name,
         tag: `kotx-task-${task.id}`,
         url: notifyUrl(task),

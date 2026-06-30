@@ -20,8 +20,8 @@
     "dev:worker": "tsx watch packages/worker/src/index.ts",
     "start:app": "node packages/app/dist/index.js",
     "start:worker": "node packages/worker/dist/index.js",
-    "migrate:up": "node-pg-migrate up -m migrations -j sql",
-    "migrate:down": "node-pg-migrate down -m migrations -j sql"
+    "migrate:up": "node-pg-migrate up -m migrations -j sql --no-single-transaction",
+    "migrate:down": "node-pg-migrate down -m migrations -j sql --no-single-transaction"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

@@ -5,18 +5,28 @@ export interface NormalizedSubject {
   number: number;
   state: "open" | "closed";
   assignees: string[];
-  labels: string[];
+  requestedReviewers: string[];
   title: string;
   body: string;
+  // PR-only:
+  headRef?: string;
+  headRepoFullName?: string;
+  merged?: boolean;
 }
 
 export interface Normalized {
   event: string;
   action: string;
   repoFullName: string;
+  defaultBranch?: string;
   senderLogin: string;
   subject: NormalizedSubject | null;
+  // who was just assigned / requested for review in this action (assigned,
+  // review_requested) — lets us check it's me without re-listing.
+  targetLogin?: string;
   comment?: { body: string; authorLogin: string; htmlUrl: string };
+  // push events: the fully-qualified ref that was pushed (refs/heads/<branch>).
+  pushRef?: string;
 }
 
 // The webhook payloads are loosely typed; we read only the fields we need.
@@ -33,7 +43,7 @@ export function subjectFromIssue(issue: any): NormalizedSubject {
     number: issue.number,
     state: issue.state === "closed" ? "closed" : "open",
     assignees: names(issue.assignees, "login"),
-    labels: names(issue.labels, "name"),
+    requestedReviewers: [],
     title: issue.title ?? "",
     body: issue.body ?? "",
   };
@@ -45,9 +55,12 @@ function subjectFromPull(pr: any): NormalizedSubject {
     number: pr.number,
     state: pr.state === "closed" ? "closed" : "open",
     assignees: names(pr.assignees, "login"),
-    labels: names(pr.labels, "name"),
+    requestedReviewers: names(pr.requested_reviewers, "login"),
     title: pr.title ?? "",
     body: pr.body ?? "",
+    headRef: pr.head?.ref,
+    headRepoFullName: pr.head?.repo?.full_name ?? undefined,
+    merged: !!pr.merged,
   };
 }
 
@@ -57,45 +70,49 @@ export function normalize(event: string, payload: any): Normalized | null {
   if (!repoFullName) return null;
   const action: string = payload?.action ?? "";
   const senderLogin: string = payload?.sender?.login ?? "";
+  const defaultBranch: string | undefined = payload?.repository?.default_branch;
+  const base = { event, action, repoFullName, defaultBranch, senderLogin };
 
   switch (event) {
     case "issues":
       return {
-        event,
-        action,
-        repoFullName,
-        senderLogin,
+        ...base,
         subject: subjectFromIssue(payload.issue),
+        targetLogin: payload.assignee?.login,
       };
     case "pull_request":
       return {
-        event,
-        action,
-        repoFullName,
-        senderLogin,
+        ...base,
         subject: subjectFromPull(payload.pull_request),
+        // review_requested carries the requested reviewer (user or team).
+        targetLogin: payload.requested_reviewer?.login,
       };
     case "issue_comment":
-      if (action !== "created") return null; // only act on new comments
+      if (action !== "created") return null;
       return {
-        event,
-        action,
-        repoFullName,
-        senderLogin,
+        ...base,
         subject: subjectFromIssue(payload.issue),
         comment: {
           body: payload.comment?.body ?? "",
           authorLogin: payload.comment?.user?.login ?? "",
           htmlUrl: payload.comment?.html_url ?? "",
+        },
+      };
+    case "pull_request_review":
+      if (action !== "submitted") return null;
+      return {
+        ...base,
+        subject: subjectFromPull(payload.pull_request),
+        comment: {
+          body: payload.review?.body ?? "",
+          authorLogin: payload.review?.user?.login ?? "",
+          htmlUrl: payload.review?.html_url ?? "",
         },
       };
     case "pull_request_review_comment":
       if (action !== "created") return null;
       return {
-        event,
-        action,
-        repoFullName,
-        senderLogin,
+        ...base,
         subject: subjectFromPull(payload.pull_request),
         comment: {
           body: payload.comment?.body ?? "",
@@ -103,6 +120,8 @@ export function normalize(event: string, payload: any): Normalized | null {
           htmlUrl: payload.comment?.html_url ?? "",
         },
       };
+    case "push":
+      return { ...base, subject: null, pushRef: payload.ref };
     default:
       return null;
   }

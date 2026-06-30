@@ -6,9 +6,14 @@ import type {
   SubjectType,
   Task,
   TaskKind,
+  TaskRole,
   TaskRun,
   TaskState,
 } from "./types.js";
+
+// The states that hold the single active slot per (repo, subject). Mirrors the
+// partial unique index `uq_one_active_task` (migration 1700000003000).
+const ACTIVE_STATE_SQL = `('drafting','draft','queued','running','awaiting_approval')`;
 
 const { Pool } = pg;
 
@@ -61,10 +66,29 @@ export async function findActiveTask(
   const res = await getPool().query<Task>(
     `SELECT * FROM tasks
      WHERE repo_full_name = $1 AND subject_type = $2 AND subject_number = $3
-       AND state IN ('queued','running','awaiting_approval')`,
+       AND state::text IN ${ACTIVE_STATE_SQL}`,
     [repoFullName, subjectType, subjectNumber],
   );
   return res.rows[0];
+}
+
+/**
+ * Whether any task (in any state) exists for a subject. The poller uses this to
+ * fire assignment/review triggers at most once per subject — without labels to
+ * clear, level-triggered polling would otherwise re-create tasks every tick.
+ */
+export async function hasAnyTask(
+  repoFullName: string,
+  subjectType: SubjectType,
+  subjectNumber: number,
+): Promise<boolean> {
+  const res = await getPool().query(
+    `SELECT 1 FROM tasks
+     WHERE repo_full_name = $1 AND subject_type = $2 AND subject_number = $3
+     LIMIT 1`,
+    [repoFullName, subjectType, subjectNumber],
+  );
+  return (res.rowCount ?? 0) > 0;
 }
 
 export async function getTask(id: number): Promise<Task | undefined> {
@@ -79,6 +103,20 @@ export function worktreePathFor(dataDir: string, runId: number): string {
   return join(dataDir, "worktrees", String(runId));
 }
 
+/** Per-run output dir: <dataDir>/runs/<runId> (holds PROMPT.md, codex.jsonl). */
+export function runDirFor(dataDir: string, runId: number): string {
+  return join(dataDir, "runs", String(runId));
+}
+
+/**
+ * Per-task dir: <dataDir>/tasks/<taskId>. Holds the durable artifacts the
+ * frontend reads — TASK.md (the reviewable brief) and REVIEW.md — which persist
+ * across runs (a draft refresh, then the execute run) and survive human edits.
+ */
+export function taskDirFor(dataDir: string, taskId: number): string {
+  return join(dataDir, "tasks", String(taskId));
+}
+
 /**
  * Creates a task + its first run atomically, deriving the run's worktree path
  * from the generated run id. Returns undefined if an active task already exists
@@ -89,6 +127,10 @@ export async function createTaskWithRun(input: {
   subjectType: SubjectType;
   subjectNumber: number;
   kind: TaskKind;
+  role: TaskRole;
+  // initial lifecycle state: 'drafting' for Branch 1 (a draft run produces
+  // TASK.md), 'queued' for Branch 2/3 (auto-run, no approval gate).
+  initialState: Extract<TaskState, "drafting" | "queued">;
   branchName: string | null;
   triggeredBy: string;
   triggerCommentUrl?: string | null;
@@ -101,14 +143,16 @@ export async function createTaskWithRun(input: {
     try {
       const t = await client.query<Task>(
         `INSERT INTO tasks
-           (repo_full_name, subject_type, subject_number, kind, state, branch_name, triggered_by, trigger_comment_url)
-         VALUES ($1,$2,$3,$4,'queued',$5,$6,$7)
+           (repo_full_name, subject_type, subject_number, kind, role, state, branch_name, triggered_by, trigger_comment_url)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
          RETURNING *`,
         [
           input.repoFullName,
           input.subjectType,
           input.subjectNumber,
           input.kind,
+          input.role,
+          input.initialState,
           input.branchName,
           input.triggeredBy,
           input.triggerCommentUrl ?? null,
@@ -120,21 +164,58 @@ export async function createTaskWithRun(input: {
       if (isUniqueViolation(err)) return undefined;
       throw err;
     }
-    // insert with placeholder path, then set it from the generated run id
-    const r = await client.query<TaskRun>(
-      `INSERT INTO task_runs (task_id, attempt, worktree_path)
-       VALUES ($1, 1, '') RETURNING *`,
-      [task.id],
-    );
-    let run = r.rows[0]!;
-    const path = worktreePathFor(input.dataDir, run.id);
-    const u = await client.query<TaskRun>(
-      `UPDATE task_runs SET worktree_path = $2 WHERE id = $1 RETURNING *`,
-      [run.id, path],
-    );
-    run = u.rows[0]!;
+    const run = await insertRun(client, task.id, 1, input.dataDir);
     await client.query("COMMIT");
     return { task, run };
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/** Insert a run row and backfill its worktree path from the generated id. */
+async function insertRun(
+  client: pg.PoolClient,
+  taskId: number,
+  attempt: number,
+  dataDir: string,
+): Promise<TaskRun> {
+  const r = await client.query<TaskRun>(
+    `INSERT INTO task_runs (task_id, attempt, worktree_path)
+     VALUES ($1, $2, '') RETURNING *`,
+    [taskId, attempt],
+  );
+  const run = r.rows[0]!;
+  const path = worktreePathFor(dataDir, run.id);
+  const u = await client.query<TaskRun>(
+    `UPDATE task_runs SET worktree_path = $2 WHERE id = $1 RETURNING *`,
+    [run.id, path],
+  );
+  return u.rows[0]!;
+}
+
+/**
+ * Add the next attempt run for an existing task (e.g. a Branch 1 follow-up
+ * refreshes the draft, or `start` kicks off the execute phase). Returns the new
+ * run; the caller sets the task state and enqueues the job.
+ */
+export async function addRun(
+  taskId: number,
+  dataDir: string,
+): Promise<TaskRun> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const prev = await client.query<{ attempt: number }>(
+      `SELECT COALESCE(MAX(attempt), 0) AS attempt FROM task_runs WHERE task_id = $1`,
+      [taskId],
+    );
+    const next = (prev.rows[0]?.attempt ?? 0) + 1;
+    const run = await insertRun(client, taskId, next, dataDir);
+    await client.query("COMMIT");
+    return run;
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
     throw err;
@@ -170,33 +251,56 @@ export async function setTaskPr(id: number, prNumber: number): Promise<void> {
   ]);
 }
 
-// ── listings (for the web UI) ───────────────────────────────────────────────
+/**
+ * Move a subject's active tasks to a terminal state — e.g. when its PR is
+ * merged/closed (Branch lifecycle). Only touches non-terminal rows.
+ */
+export async function closeSubjectTasks(
+  repoFullName: string,
+  subjectType: SubjectType,
+  subjectNumber: number,
+  state: Extract<TaskState, "done" | "cancelled">,
+): Promise<number> {
+  const res = await getPool().query(
+    `UPDATE tasks SET state = $4
+     WHERE repo_full_name = $1 AND subject_type = $2 AND subject_number = $3
+       AND state::text NOT IN ('done','failed','cancelled','timed_out')`,
+    [repoFullName, subjectType, subjectNumber, state],
+  );
+  return res.rowCount ?? 0;
+}
 
-export interface RunListItem {
-  run_id: number;
-  attempt: number;
+// ── listings (for the external frontend) ────────────────────────────────────
+
+export interface TaskListItem extends Task {
+  run_id: number | null;
+  attempt: number | null;
   outcome: RunOutcome | null;
   started_at: Date | null;
   finished_at: Date | null;
-  task_id: number;
-  repo_full_name: string;
-  subject_type: SubjectType;
-  subject_number: number;
-  kind: TaskKind;
-  state: TaskState;
-  created_at: Date;
-  updated_at: Date;
 }
 
-export async function listRuns(limit = 200): Promise<RunListItem[]> {
-  const res = await getPool().query<RunListItem>(
-    `SELECT
-       r.id AS run_id, r.attempt, r.outcome, r.started_at, r.finished_at,
-       t.id AS task_id, t.repo_full_name, t.subject_type, t.subject_number,
-       t.kind, t.state, t.created_at, t.updated_at
-     FROM task_runs r
-     JOIN tasks t ON t.id = r.task_id
-     ORDER BY r.id DESC
+/**
+ * Tasks joined with their latest run, newest first. scope='active' returns only
+ * tasks that still need attention (non-terminal); 'all' returns everything.
+ */
+export async function listTasks(
+  scope: "active" | "all",
+  limit = 200,
+): Promise<TaskListItem[]> {
+  const where =
+    scope === "active"
+      ? `WHERE t.state::text NOT IN ('done','failed','cancelled','timed_out')`
+      : ``;
+  const res = await getPool().query<TaskListItem>(
+    `SELECT t.*,
+       r.id AS run_id, r.attempt, r.outcome, r.started_at, r.finished_at
+     FROM tasks t
+     LEFT JOIN LATERAL (
+       SELECT * FROM task_runs WHERE task_id = t.id ORDER BY attempt DESC LIMIT 1
+     ) r ON true
+     ${where}
+     ORDER BY t.updated_at DESC
      LIMIT $1`,
     [limit],
   );

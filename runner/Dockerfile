@@ -43,4 +43,4 @@ WORKDIR /workspace
 
 # The worker overrides CMD with the actual `codex exec …` invocation, but this
 # documents the expected shape.
-CMD ["bash", "-lc", "codex exec --json --sandbox workspace-write -c approval_policy=never - < /run-output/TASK.md > /run-output/codex.jsonl 2>&1"]
+CMD ["bash", "-lc", "codex exec --json --sandbox workspace-write -c approval_policy=never - < /run-output/PROMPT.md > /run-output/codex.jsonl 2>&1"]

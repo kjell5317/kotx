@@ -1,9 +1,31 @@
 # kotx — Personal Codex Agent (as-built spec)
 
-Status: v2 · This describes the system **as built and deployed**, which has
-diverged substantially from the original design (GitHub App + HITL + PR
-opening). The original design notes are summarized in §13 (Changelog) for
-context. For how to run it, see [README.md](README.md).
+Status: v3 · This describes the system **as built**. v3 made it **headless** (a
+Bearer-protected JSON API replaced the bundled UI), replaced labels/`/agent`
+commands with **three role-aware webhook workflows** (task / conflict / review),
+and decoupled task creation from execution (a reviewable `TASK.md` you start from
+the frontend). The v2→v3 changes are summarized in §14; older history in §13. For
+how to run it, see [README.md](README.md).
+
+## 0. The v3 workflow model
+
+Triggers are plain GitHub events (or polling) keyed to your role on the subject
+(`assignee_login` in `repos.yml`). No labels, no commands.
+
+1. **Task (Branch 1)** — issue assigned to you, or a comment/review on an
+   issue/PR you're assigned to. A read-only **draft** Codex run produces
+   `TASK.md` (brief + plan) and the task waits in `draft` ("waiting on my
+   approval"). You review/edit it via the API and `POST …/start`; the **execute**
+   run then implements, pushes the branch, and comments — task → `awaiting_external`.
+2. **Conflict (Branch 2)** — a PR assigned to you is unmergeable (`mergeable_state
+   = dirty`), detected on `pull_request` synchronize/open or a `push` to the
+   default branch. Codex resolves the in-progress merge automatically (no
+   approval) and pushes → `awaiting_external`.
+3. **Review (Branch 3)** — your review is requested on a PR, or such a PR gets new
+   commits. A read-only review run writes `REVIEW.md`; the task waits in
+   `awaiting_approval`. `POST …/approve` posts it as a PR comment → `done`.
+
+A merged/closed PR closes its open tasks (`done`/`cancelled`).
 
 ---
 
@@ -81,10 +103,9 @@ and nothing it writes should read as machine-authored.
 ## 4. Architecture
 
 ```text
-GitHub issue/PR  ──(webhook)──┐
-   assigned to me             │        ┌── app: Fastify receiver + ingestion
-   + label / /agent command   ├──────▶ │   (also: poller for poll:true repos)
-                              ─┘        └── enqueue (Redis/BullMQ)
+GitHub issue/PR  ──(webhook)──┐        ┌── app: Fastify receiver + 3-branch
+   assigned / review-req'd /   ├──────▶ │   ingestion + JSON API (also: poller)
+   commented + push to main   ─┘        └── enqueue (Redis/BullMQ)
                                                     │
                                                     ▼
                                          worker: one job at a time per repo
@@ -120,50 +141,69 @@ The agent therefore acts as **me**. No GitHub App, no installation tokens.
 
 ### 5.2 Two input modes (per repo)
 - **Webhook** (`poll: false`): a repo webhook → `/github/webhook`, HMAC-verified.
-- **Polling** (`poll: true`): the app polls the repo every `POLL_INTERVAL_SEC`
-  for trigger labels and `/agent` commands — for repos where I can't register a
-  webhook. To avoid level-triggered re-firing, the **trigger label is removed
-  once a task is enqueued**; re-add it to run again. Comments are de-duped by id.
+  Subscribe to **issues, pull_request, pull_request_review, issue_comment,
+  pull_request_review_comment, push**.
+- **Polling** (`poll: true`): the app polls every `POLL_INTERVAL_SEC` for repos
+  where I can't register a webhook. It diffs GitHub state against existing tasks
+  to find new assignments, review requests, conflicts, and follow-up comments —
+  **no labels or commands**. Without a label to clear, assignment/review triggers
+  fire at most once per subject (`hasAnyTask` guard); follow-ups arrive via the
+  comment cursor (de-duped by comment id); conflict checks self-limit (only fire
+  when the PR is dirty and has no active task).
 
-### 5.3 Triggers and commands
-Trigger labels (added by me): `agent:ready` (issue → implement),
-`agent:review` (PR → work on the PR), `agent:ignore` (suppress).
+### 5.3 Triggers (no labels, no commands)
+All labels (`agent:*`) and `/agent` commands were **removed** in v3. Triggers are
+the three role-aware workflows in §0, driven by webhook events:
 
-Commands (comment, **only honored from the repo's `assignee_login`**):
-
-```text
-/agent run      start work on the issue
-/agent review   work on the PR
-/agent stop     cancel the active task
-/agent status   report state
-```
-
-(`approve`/`reject` were removed with HITL.) Webhook label triggering fires only
-on the `labeled` action; comment events trigger only via an explicit command —
-this prevents the agent's own comments (posted as me) from re-triggering runs.
+- `issues` assigned / `issue_comment` / `pull_request_review[_comment]` on a
+  subject I'm assigned to → Branch 1 (draft). My own comments are ignored (the
+  agent comments as me — this prevents a self-loop).
+- `pull_request` review_requested (me) / synchronize while my review is requested
+  → Branch 3.
+- `pull_request` synchronize/open + `push` to the default branch, for PRs assigned
+  to me → Branch 2 (only when `mergeable_state = dirty`).
+- `pull_request` closed → close the subject's open tasks.
 
 ### 5.4 Eligibility
-A task is eligible when: repo is allowlisted + enabled; no `agent:ignore`; the
-issue/PR is **open and assigned to `assignee_login`**; a trigger label/command is
-present; and no active task already exists for that subject.
+Repo allowlisted + enabled; subject open; my role on the subject matches the
+branch (assignee for Branch 1/2, requested reviewer for Branch 3); and at most one
+**active** task per subject (the partial unique index — `awaiting_external` and
+terminal states don't count, so a follow-up can open a new task).
 
 ---
 
-## 6. Behavior model (the core change)
+## 6. Behavior model
 
-**No HITL, no PRs.** The agent does whatever it needs inside the container, then:
+Kinds (`task_kind`): `implement` (Branch 1, two phases — `draft` then `execute`),
+`resolve_conflict` (Branch 2), `review` (Branch 3, read-only). Behavior is decided
+by the **subject + kind/phase**, not how it was triggered. Each run pipes
+`PROMPT.md` (rendered by the worker) into Codex; the durable artifacts the
+frontend reads (`TASK.md`, `REVIEW.md`) live in a per-task dir so they survive a
+draft refresh, the execute run, and human edits.
 
-- **Issue** (`implement`): work on a fresh branch named GitHub-style
-  `<number>-<slugified-title>` (e.g. `31-add-metadata-index`) off the default
-  branch → commit → **push the branch** → comment a summary on the issue ending
-  with “Changes pushed to `<branch>`.” **No PR is opened.**
-- **PR** (`review`): check out the PR's **own head branch**, make changes →
-  commit → **push back to that branch** (updating the PR) → comment a summary.
-  Fork PRs are detected and skipped (can't push to a fork's branch).
+- **draft** (read-only): inspect the repo + issue/PR/discussion → write
+  `/workspace/TASK.md` (goal · context · plan). Saved to the task dir; state →
+  `draft`. Never commits. First-assignment vs. follow-up tone via an `isFollowUp`
+  flag (a re-triggered draft is attempt > 1).
+- **implement/execute**: pipe the approved (possibly edited) `TASK.md` as the
+  brief → merge the default branch in → Codex implements → commit + push the
+  branch → comment the `AGENT_RESULT.md` summary. Issue branch is GitHub-style
+  `<n>-<slug>` off default; PR follow-up uses the PR's own head branch. State →
+  `awaiting_external`.
+- **resolve_conflict**: merge the default branch (leaving conflicts), Codex
+  resolves them, commit the merge + push → `awaiting_external`. Conflict-marker
+  safety net before commit.
+- **review** (read-only): write `/workspace/REVIEW.md` as a ready-to-post PR
+  comment; saved to the task dir; state → `awaiting_approval`. Never commits.
+  `POST …/approve` posts it verbatim → `done`.
 
-The summary is exactly what Codex wrote to `AGENT_RESULT.md`; the prompts
-instruct it to write in plain developer voice and **never** mention being an AI,
-agent, assistant, or automation. No `🤖`, no "generated by" footer. Commits and
+Read-only is structural: git creds never enter the container (SPEC §12), and the
+worker simply doesn't commit/push for draft/review. Fork PRs can't be pushed to,
+so the write-kinds bail with a failure comment; the read-only review reads a
+fork's head via the mirror's `refs/pull/*` namespace.
+
+All agent-authored text is plain developer voice — **never** mentions being an
+AI/agent/assistant or automation; no `🤖`/"generated by" footer. Commits and
 comments are authored as me.
 
 ---
@@ -177,12 +217,25 @@ task_runs     one attempt per task (worktree path, container, outcome, logs)
 github_deliveries   webhook + poll-comment idempotency (delivery/comment ids)
 ```
 
-`hitl_requests` and the `hitl_state` enum were **dropped** (migration
-`1700000001000_drop_hitl.sql`). The unused enum *values* `awaiting_approval`
-(task_state) / `needs_approval` (run_outcome) are left in place (dropping enum
-values is invasive and they're inert).
+`tasks.role` (`assignee` | `reviewer`) records my relationship to the subject and
+drives which list the frontend shows it in. `hitl_requests`/`hitl_state` were
+dropped earlier (`1700000001000_drop_hitl.sql`).
 
-Task states in use: `queued → running → done | failed | cancelled | timed_out`.
+Task states (`1700000003000_workflow_v3.sql` added `drafting`, `draft`,
+`awaiting_external`; `awaiting_approval` was a pre-existing inert value, now
+reused):
+
+```text
+Branch 1: drafting → draft → (start) → queued → running → awaiting_external → done
+Branch 2:                                queued → running → awaiting_external → done
+Branch 3:                                queued → running → awaiting_approval → (approve) → done
+any:                                     … → failed | cancelled | timed_out
+```
+
+`displayStatus()` maps these to human labels — `draft`/`awaiting_approval` →
+"waiting on my approval", `awaiting_external` → "waiting on external approval".
+The active-slot guard (`uq_one_active_task`) covers
+`drafting,draft,queued,running,awaiting_approval`.
 
 ---
 
@@ -219,7 +272,7 @@ docker run --rm --cpus=2 --memory=4g \
   kotx-runner \
   bash -lc 'codex exec --json --ephemeral \
             --dangerously-bypass-approvals-and-sandbox - \
-            < /run-output/TASK.md > /run-output/codex.jsonl 2>&1'
+            < /run-output/PROMPT.md > /run-output/codex.jsonl 2>&1'
 ```
 
 Key decisions, all forced by reality during bring-up:
@@ -269,11 +322,12 @@ Outcome classification (output files are authoritative; exit code breaks ties):
 - `config/defaults.yml` — concurrency, timeouts, container limits, codex flags
   (`approval_policy` retained but the runner currently bypasses sandbox/approval).
 - `config/repos.yml` — operator-owned allowlist; per repo: `enabled`,
-  `default_branch`, `assignee_login`, `poll`. Never read from a target repo.
+  `default_branch`, `assignee_login` (my login — also the review-request login),
+  `poll`. Never read from a target repo. (The unused `allow_infra_changes`/
+  `allow_secret_access`/`require_label_or_command` flags were removed in v3.)
 - `.env` — PAT, webhook secret, commit identity, image refs, GHCR pull creds,
-  paths, poll interval. The `allow_infra_changes`/`allow_secret_access` flags
-  exist in schema but are **not enforced** (HITL gating was removed); treat as
-  documentation only.
+  paths, poll interval, plus `API_TOKEN` (Bearer gate for `/api/*`) and optional
+  `CORS_ORIGIN` for the browser frontend.
 
 ---
 
@@ -289,6 +343,19 @@ Outcome classification (output files are authoritative; exit code breaks ties):
 - Invariants: never opens PRs, never merges, never deploys, never force-pushes
   without intent. Open trade-off: bypassing Codex's sandbox means its shell has
   network + root *inside the container* (see §2.2).
+- v3 trade-off: the **app** now mounts the Docker socket (for `GET
+  /api/containers`) and the data dir read-write (to serve/edit `TASK.md`). The
+  socket is read-only in intent (list/inspect) but is still host-level access;
+  acceptable for a single-user personal tool, behind the `API_TOKEN` gate.
+
+### 12.1 JSON API
+
+`/api/*` is gated by `Authorization: Bearer $API_TOKEN` (timing-safe compare;
+503 if `API_TOKEN` is unset). `CORS_ORIGIN` enables the browser frontend.
+Endpoints: `GET /api/tasks?scope=active|all`, `GET /api/tasks/:id`,
+`GET|PUT /api/tasks/:id/task`, `GET /api/tasks/:id/review`,
+`POST /api/tasks/:id/{start,approve,stop}`, `GET /api/containers`. See
+[README.md](README.md) for the table.
 
 ---
 
@@ -308,4 +375,17 @@ Outcome classification (output files are authoritative; exit code breaks ties):
 | Runner image | Node only | Node + Python + uv; runs as root; pulls more at runtime |
 | Images | built on the VPS | CI → GHCR; compose pulls; auto-migrate |
 | Commands | run/review/stop/status/approve/reject | run/review/stop/status |
-```
+
+## 14. Changelog v2 → v3
+
+| Area | v2 | v3 |
+|------|----|----|
+| Interface | bundled HTML dashboard (`/ui`, Basic auth) | headless JSON API (`/api/*`, Bearer) for an external frontend |
+| Triggers | `agent:*` labels + `/agent` commands | three role-aware webhook workflows; **no labels/commands** |
+| Task vs run | trigger → run immediately | Branch 1 produces a reviewable `TASK.md`; I `start` it from the frontend |
+| Kinds | implement / review (review wrote to the PR) | implement (draft+execute) / resolve_conflict / review (**read-only**) |
+| Conflicts | left for the agent mid-implement | dedicated auto Branch 2 (resolve + push, no approval) |
+| Review | wrote to the PR branch | read-only → `REVIEW.md`, posted to the PR on my approval |
+| States | queued/running/done/… | + `drafting`, `draft`, `awaiting_approval`, `awaiting_external`; `role` column |
+| Codex stdin | `TASK.md` | `PROMPT.md` (TASK.md/REVIEW.md are per-task artifacts) |
+| Polling | polled labels + commands | diffs GitHub state for assignments/reviews/conflicts/comments |

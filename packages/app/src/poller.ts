@@ -1,29 +1,21 @@
 import {
-  createTaskWithRun,
-  enqueueTask,
-  findActiveTask,
   getOctokit,
-  LABELS,
-  loadEnv,
+  hasAnyTask,
   loadRepos,
   logger,
-  parseCommand,
   recordDelivery,
   splitRepo,
   type RepoConfig,
-  type SubjectType,
-  type TaskKind,
 } from "@kotx/shared";
 import type { Octokit } from "@octokit/rest";
-import { subjectFromIssue, type Normalized } from "./extract.js";
-import { ingest } from "./pipeline.js";
+import type { NormalizedSubject } from "./extract.js";
+import { maybeResolveConflict, startDraft, startReview } from "./pipeline.js";
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_SEC ?? 30) * 1000;
-// On startup (or after the cursor is lost) look back this far for commands so a
-// brief app downtime doesn't drop an approval. recordDelivery dedups overlaps.
+// On startup (or after the cursor is lost) look back this far for comments so a
+// brief downtime doesn't drop a follow-up. recordDelivery dedups overlaps.
 const INITIAL_LOOKBACK_MS = 60 * 60 * 1000;
 
-// per-repo "comments since" cursor (ISO timestamp)
 const commentCursor = new Map<string, string>();
 
 /** Start polling for repos configured with `poll: true`. Returns null if none. */
@@ -50,98 +42,88 @@ export function startPoller(): NodeJS.Timeout | null {
 async function pollRepo(repo: RepoConfig): Promise<void> {
   const octokit = getOctokit();
   const [owner, name] = splitRepo(repo.full_name);
-  await pollLabels(octokit, owner, name, repo);
-  await pollCommands(octokit, owner, name, repo);
+  const me = repo.assignee_login;
+  await pollIssues(octokit, owner, name, repo, me);
+  await pollPulls(octokit, owner, name, repo, me);
+  await pollComments(octokit, owner, name, repo, me);
 }
 
-function labelNames(
-  labels: Array<string | { name?: string }> | undefined,
+function logins(
+  arr: Array<{ login?: string } | null> | null | undefined,
 ): string[] {
-  if (!labels) return [];
-  return labels
-    .map((l) => (typeof l === "string" ? l : (l.name ?? "")))
-    .filter(Boolean);
+  return (arr ?? [])
+    .map((x) => x?.login)
+    .filter((l): l is string => !!l);
 }
 
-async function pollLabels(
+/** Open issues assigned to me → draft (Branch 1). startDraft no-ops if active. */
+async function pollIssues(
   octokit: Octokit,
   owner: string,
   name: string,
   repo: RepoConfig,
+  me: string,
 ): Promise<void> {
-  // implement: open issues (not PRs) assigned to me with agent:ready
-  const ready = await octokit.issues.listForRepo({
+  const res = await octokit.issues.listForRepo({
     owner,
     repo: name,
     state: "open",
-    assignee: repo.assignee_login,
-    labels: LABELS.ready,
+    assignee: me,
     per_page: 100,
   });
-  for (const it of ready.data) {
-    if (it.pull_request) continue; // implement is for issues
-    if (labelNames(it.labels).includes(LABELS.ignore)) continue;
-    await tryStart(octokit, owner, name, repo, "issue", it.number, "implement", LABELS.ready);
-  }
-
-  // review: open PRs assigned to me with agent:review
-  const review = await octokit.issues.listForRepo({
-    owner,
-    repo: name,
-    state: "open",
-    assignee: repo.assignee_login,
-    labels: LABELS.review,
-    per_page: 100,
-  });
-  for (const it of review.data) {
-    if (!it.pull_request) continue; // review is for PRs
-    if (labelNames(it.labels).includes(LABELS.ignore)) continue;
-    await tryStart(octokit, owner, name, repo, "pull_request", it.number, "review", LABELS.review);
+  for (const it of res.data) {
+    if (it.pull_request) continue; // PRs handled by pollPulls
+    // fire assignment-draft once per subject; follow-ups come via pollComments
+    if (await hasAnyTask(repo.full_name, "issue", it.number)) continue;
+    const subject: NormalizedSubject = {
+      type: "issue",
+      number: it.number,
+      state: "open",
+      assignees: logins(it.assignees),
+      requestedReviewers: [],
+      title: it.title ?? "",
+      body: it.body ?? "",
+    };
+    await startDraft(repo, subject, me, null);
   }
 }
 
-async function tryStart(
+/** Open PRs: review requests (Branch 3), conflicts + drafts for mine (Branch 1/2). */
+async function pollPulls(
   octokit: Octokit,
   owner: string,
   name: string,
   repo: RepoConfig,
-  subjectType: SubjectType,
-  subjectNumber: number,
-  kind: TaskKind,
-  label: string,
+  me: string,
 ): Promise<void> {
-  const active = await findActiveTask(repo.full_name, subjectType, subjectNumber);
-  if (active) return; // already running/awaiting — skip silently (no spam)
-
-  // the worker derives the branch name (needs the issue/PR title)
-  const created = await createTaskWithRun({
-    repoFullName: repo.full_name,
-    subjectType,
-    subjectNumber,
-    kind,
-    branchName: null,
-    triggeredBy: repo.assignee_login,
-    dataDir: loadEnv().agentDataDir,
+  const res = await octokit.pulls.list({
+    owner,
+    repo: name,
+    state: "open",
+    per_page: 100,
   });
-  if (!created) return; // lost a race; another path created it
-
-  await enqueueTask({
-    taskId: created.task.id,
-    taskRunId: created.run.id,
-    mode: kind === "implement" ? "implement" : "review",
-    repoFullName: repo.full_name,
-    subject: { type: subjectType, number: subjectNumber },
-  });
-
-  // edge-convert: drop the trigger label so the level-triggered poll won't
-  // re-enqueue. Re-add the label to run again.
-  await octokit.issues
-    .removeLabel({ owner, repo: name, issue_number: subjectNumber, name: label })
-    .catch(() => {});
-  logger.info(
-    { taskId: created.task.id, repo: repo.full_name, subjectNumber, kind },
-    "poll: task enqueued",
-  );
+  for (const pr of res.data) {
+    const subject: NormalizedSubject = {
+      type: "pull_request",
+      number: pr.number,
+      state: "open",
+      assignees: logins(pr.assignees),
+      requestedReviewers: logins(pr.requested_reviewers),
+      title: pr.title ?? "",
+      body: pr.body ?? "",
+      headRef: pr.head?.ref,
+      headRepoFullName: pr.head?.repo?.full_name ?? undefined,
+    };
+    const seen = await hasAnyTask(repo.full_name, "pull_request", pr.number);
+    if (subject.requestedReviewers.includes(me)) {
+      // review once per subject via poll (re-review on new commits needs webhooks)
+      if (!seen) await startReview(repo, subject, me);
+    } else if (subject.assignees.includes(me)) {
+      // conflict check is self-limiting (only fires when dirty + no active task)
+      await maybeResolveConflict(repo, subject, me);
+      if (!seen) await startDraft(repo, subject, me, null);
+    }
+  }
 }
 
 function issueNumberFromUrl(url: string | undefined): number | null {
@@ -150,11 +132,13 @@ function issueNumberFromUrl(url: string | undefined): number | null {
   return m ? Number(m[1]) : null;
 }
 
-async function pollCommands(
+/** New comments by others on subjects assigned to me → follow-up draft. */
+async function pollComments(
   octokit: Octokit,
   owner: string,
   name: string,
   repo: RepoConfig,
+  me: string,
 ): Promise<void> {
   const cursor =
     commentCursor.get(repo.full_name) ??
@@ -171,45 +155,32 @@ async function pollCommands(
   });
 
   for (const c of res.data) {
-    const body = c.body ?? "";
-    const cmd = parseCommand(body);
-    if (!cmd) continue;
     const author = c.user?.login ?? "";
-    if (author !== repo.assignee_login) continue; // only the commander
-
-    // dedup across overlapping windows / restarts (reuses delivery table)
+    if (author === me) continue; // skip my own comments (avoid self-loop)
     const fresh = await recordDelivery(`poll-comment-${c.id}`, "issue_comment");
     if (!fresh) continue;
 
     const issueNumber = issueNumberFromUrl(c.issue_url);
     if (!issueNumber) continue;
-
-    let subject;
     try {
-      const issue = await octokit.issues.get({
-        owner,
-        repo: name,
-        issue_number: issueNumber,
-      });
-      subject = subjectFromIssue(issue.data);
+      const issue = await octokit.issues.get({ owner, repo: name, issue_number: issueNumber });
+      const it = issue.data;
+      if (it.state !== "open") continue;
+      const assignees = logins(it.assignees);
+      if (!assignees.includes(me)) continue;
+      const subject: NormalizedSubject = {
+        type: it.pull_request ? "pull_request" : "issue",
+        number: it.number,
+        state: "open",
+        assignees,
+        requestedReviewers: [],
+        title: it.title ?? "",
+        body: it.body ?? "",
+      };
+      await startDraft(repo, subject, author, c.html_url ?? null);
     } catch (err) {
-      logger.warn({ err, issueNumber }, "poll: failed to load issue for command");
-      continue;
+      logger.warn({ err, issueNumber }, "poll: failed to handle comment");
     }
-
-    const n: Normalized = {
-      event: "issue_comment",
-      action: "created",
-      repoFullName: repo.full_name,
-      senderLogin: author,
-      subject,
-      comment: { body, authorLogin: author, htmlUrl: c.html_url ?? "" },
-    };
-    const result = await ingest(n);
-    logger.info(
-      { repo: repo.full_name, issueNumber, cmd, result: result.status },
-      "poll: command handled",
-    );
   }
 
   commentCursor.set(repo.full_name, tickStart);

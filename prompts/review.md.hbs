@@ -1,7 +1,11 @@
-# Task: continue work on pull request #{{subjectNumber}}
+# Task: review pull request #{{subjectNumber}}
 
 Repository: {{repoFullName}}
-PR branch (already checked out at /workspace): {{branchName}}
+PR branch (checked out **read-only** at /workspace): {{branchName}}
+Base branch: {{defaultBranch}}
+
+Your review was requested on this PR. Produce a thorough, useful code review.
+**Do not change any code, do not commit, and do not push** — this is read-only.
 
 ## PR title
 {{title}}
@@ -10,65 +14,43 @@ PR branch (already checked out at /workspace): {{branchName}}
 {{body}}
 
 {{#if comments.length}}
-## Discussion (chronological — this is usually where the actual requests are)
+## Existing discussion (chronological)
 {{#each comments}}
 — **{{this.author}}**{{#if this.location}} · {{this.location}}{{/if}}:
 {{this.body}}
 
 {{/each}}
-{{else}}
-## Discussion
-_(no comments yet)_
 {{/if}}
-
-{{#if mergeConflicts.length}}
-## ⚠️ Resolve merge conflicts first
-The latest default branch was merged into this PR's branch and these files
-conflict. Resolve them (remove the conflict markers, keep the correct combined
-result) as part of your work — leave no `<<<<<<<`/`=======`/`>>>>>>>` markers:
-{{#each mergeConflicts}}
-- {{this}}
-{{/each}}
-{{/if}}
-
-## Working agreement
-
-- `/workspace` is the PR's own branch. Make your changes directly there — they
-  will be pushed back to this PR.
-- You may run any commands you need — build, tests, linters, package managers.
-  This container is your sandbox.
-- Network access is available and you run as root: install whatever the project
-  needs (`uv`, `pip`, `npm`/`pnpm`/`yarn`, or system packages via `apt-get`).
-  Node and Python 3 (with `uv`) are preinstalled.
-- Do not touch git history or remotes. The host commits and pushes after you
-  finish.
 
 ## What to do
 
-Advance the pull request: implement requested changes, fix problems, and finish
-the work described above. Keep changes focused and consistent with the existing
-code and the PR's intent.
+1. Inspect the diff against the base branch (e.g. `git diff origin/{{defaultBranch}}...HEAD`)
+   and read the surrounding code for context.
+2. Evaluate correctness, edge cases, security, tests, and clarity. You may build
+   and run tests to verify behavior (network + root available; Node and Python 3
+   with `uv` preinstalled) — but make no source changes.
+3. Write your review to `/workspace/REVIEW.md`. It will be posted **verbatim as a
+   single PR comment**, so write it exactly as you want it to appear.
 
-## Definition of Done
-
-1. The work is implemented, focused, and consistent with the PR.
-2. Add or update tests where appropriate, and run the project's checks where you
-   can.
-3. Write a concise summary of what you changed to `/workspace/AGENT_RESULT.md`.
-4. Write a clear commit message (one-line subject + body) to
-   `/workspace/COMMIT_MSG.md`.
-
-## Summary style (important)
-
-Write `AGENT_RESULT.md` as a normal PR update comment in plain, neutral voice.
-Do **not** refer to yourself as an AI, an agent, an assistant, or mention that
-the work was automated. Just describe what changed.
-
-### AGENT_RESULT.md template
+## REVIEW.md format
 
 ```markdown
 ## Summary
-## Changes
-## Tests
-## Notes / follow-ups
+<2–4 sentences: what the PR does and your overall assessment>
+
+## Findings
+<concrete points. Reference files and lines as `path/to/file.ts:42`. Order by
+importance. Use **blocking** / **non-blocking** / **nit** prefixes so the author
+can triage. If something is genuinely good, it's fine to say so briefly.>
+
+## Verdict
+<one of: looks good to merge / approve with minor changes / needs changes —
+plus a one-line rationale>
 ```
+
+## Voice (important)
+
+Write `REVIEW.md` as a normal human reviewer's comment in plain, neutral voice. Do
+**not** refer to yourself as an AI, an agent, an assistant, or mention automation.
+Be specific and direct; avoid filler praise. If the diff is empty or you can't
+determine the changes, say so plainly in REVIEW.md instead of inventing findings.

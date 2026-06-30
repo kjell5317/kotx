@@ -40,6 +40,12 @@ export interface Env {
   agentDataDir: string;
   codexHome: string;
   configDir: string;
+  // Bearer token gating the JSON API consumed by the external frontend. Unset =
+  // API disabled (endpoints return 503).
+  apiToken?: string;
+  // Allowed CORS origin for the external frontend (e.g. https://app.example.com).
+  // Unset = no CORS headers (same-origin / non-browser clients only).
+  corsOrigin?: string;
 }
 
 let cachedEnv: Env | undefined;
@@ -61,6 +67,8 @@ export function loadEnv(): Env {
     agentDataDir: process.env.AGENT_DATA_DIR ?? "/srv/agent",
     codexHome: process.env.CODEX_HOME ?? "/srv/agent/codex-home",
     configDir: process.env.CONFIG_DIR ?? "./config",
+    apiToken: process.env.API_TOKEN || undefined,
+    corsOrigin: process.env.CORS_ORIGIN || undefined,
   };
   return cachedEnv;
 }

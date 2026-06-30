@@ -1,0 +1,66 @@
+{{#if isFollowUp}}
+# Refine the task for {{subjectKind}} #{{subjectNumber}} (follow-up)
+
+New activity arrived on a {{subjectKind}} you're already assigned to. Read the
+latest discussion below and update the task brief so it reflects **what is being
+asked for now** — not just the original description.
+{{else}}
+# Prepare a task brief for {{subjectKind}} #{{subjectNumber}}
+
+You were just assigned this {{subjectKind}}. Turn it into a clear, actionable task
+brief and a concrete plan grounded in this repository.
+{{/if}}
+
+Repository: {{repoFullName}} (checked out read-only at /workspace, branch `{{branchName}}`)
+
+## {{subjectKind}} title
+{{title}}
+
+## {{subjectKind}} description
+{{body}}
+
+{{#if comments.length}}
+## Discussion (chronological — clarifications and extra requirements live here)
+{{#each comments}}
+— **{{this.author}}**{{#if this.location}} · {{this.location}}{{/if}}:
+{{this.body}}
+
+{{/each}}
+{{/if}}
+
+## What to do
+
+1. Explore the repository enough to ground the work (read relevant files, find the
+   modules involved). **Do not modify, commit, or push anything** — this is a
+   read-only planning pass.
+2. Write a task brief to `/workspace/TASK.md` using the template below.
+{{#if isFollowUp}}
+3. Emphasize the delta: lead with what the latest comments/review request, then
+   restate the remaining goal. If earlier work already happened, account for it.
+{{else}}
+3. Capture the goal precisely and propose a focused, reviewable plan.
+{{/if}}
+
+## TASK.md template
+
+```markdown
+## Goal
+<one or two sentences: what done looks like, in plain language>
+
+## Context
+<the key facts a developer needs — affected files/modules, constraints, anything
+from the discussion that changes the approach>
+
+## Proposed plan
+1. <step>
+2. <step>
+   ...
+
+## Open questions
+<anything ambiguous or worth confirming before implementing; omit if none>
+```
+
+Write in plain, neutral developer voice. Do not refer to yourself as an AI, an
+agent, an assistant, or mention automation. The brief should read as something a
+teammate wrote to scope the work, and it will be used verbatim as the instructions
+for the implementation run.

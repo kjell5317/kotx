@@ -1,22 +1,14 @@
-# Task: implement GitHub issue #{{subjectNumber}}
+# Task: implement {{subjectKind}} #{{subjectNumber}}
 
 Repository: {{repoFullName}}
 Branch (already checked out at /workspace): {{branchName}}
 
-## Issue title
-{{title}}
+The brief below was reviewed and approved before this run. Treat it as the source
+of truth for what to build.
 
-## Issue description
-{{body}}
+## Task brief
 
-{{#if comments.length}}
-## Discussion (chronological — may contain clarifications or extra requirements)
-{{#each comments}}
-— **{{this.author}}**:
-{{this.body}}
-
-{{/each}}
-{{/if}}
+{{taskBrief}}
 
 {{#if mergeConflicts.length}}
 ## ⚠️ Resolve merge conflicts first
@@ -41,8 +33,8 @@ part of your work — leave no `<<<<<<<`/`=======`/`>>>>>>>` markers behind:
 
 ## Definition of Done
 
-1. The requested change is implemented, focused, and reviewable.
-2. No unrelated refactors; preserve existing behavior unless the issue asks
+1. The brief is implemented, focused, and reviewable.
+2. No unrelated refactors; preserve existing behavior unless the brief asks
    otherwise.
 3. Add or update tests where appropriate, and run the project's checks where you
    can.

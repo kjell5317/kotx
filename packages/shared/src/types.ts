@@ -1,11 +1,18 @@
 // Domain types mirroring the DB schema (SPEC §4) and queue contract (SPEC §7).
 
-export type TaskKind = "implement" | "review";
+// implement       — Branch 1: refine an issue/PR into a TASK.md, then (on start)
+//                   write code, push the branch, and comment the summary.
+// resolve_conflict — Branch 2: resolve an unmergeable PR's conflicts and push.
+// review          — Branch 3: read-only review of a PR → REVIEW.md (no commits).
+export type TaskKind = "implement" | "resolve_conflict" | "review";
 
 export type TaskState =
+  | "drafting" // Branch 1: refinement run in flight (producing TASK.md)
+  | "draft" // Branch 1: TASK.md ready, waiting for me to start it
   | "queued"
   | "running"
-  | "awaiting_approval"
+  | "awaiting_approval" // Branch 3: REVIEW.md ready, waiting for me to post it
+  | "awaiting_external" // my changes are pushed; waiting on others to review/merge
   | "done"
   | "failed"
   | "cancelled"
@@ -18,6 +25,41 @@ export const TERMINAL_STATES: ReadonlySet<TaskState> = new Set<TaskState>([
   "timed_out",
 ]);
 
+// States that occupy the single active slot per (repo, subject). awaiting_external
+// and terminal states are NOT active — a follow-up comment may open a new task.
+export const ACTIVE_STATES: ReadonlySet<TaskState> = new Set<TaskState>([
+  "drafting",
+  "draft",
+  "queued",
+  "running",
+  "awaiting_approval",
+]);
+
+/** Human-facing status for the external frontend. */
+export function displayStatus(state: TaskState): string {
+  switch (state) {
+    case "drafting":
+      return "preparing task";
+    case "draft":
+    case "awaiting_approval":
+      return "waiting on my approval";
+    case "awaiting_external":
+      return "waiting on external approval";
+    case "queued":
+      return "queued";
+    case "running":
+      return "running";
+    case "done":
+      return "done";
+    case "failed":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+    case "timed_out":
+      return "timed out";
+  }
+}
+
 export type RunOutcome =
   | "completed"
   | "needs_approval"
@@ -27,12 +69,16 @@ export type RunOutcome =
 
 export type SubjectType = "issue" | "pull_request";
 
+/** My relationship to the subject (drives which list the frontend shows it in). */
+export type TaskRole = "assignee" | "reviewer";
+
 export interface Task {
   id: number;
   repo_full_name: string;
   subject_type: SubjectType;
   subject_number: number;
   kind: TaskKind;
+  role: TaskRole;
   state: TaskState;
   branch_name: string | null;
   pr_number: number | null;
@@ -56,24 +102,19 @@ export interface TaskRun {
   result_md: string | null;
 }
 
-// BullMQ job payload (SPEC §7)
-export type JobMode = "implement" | "review";
+// BullMQ job payload (SPEC §7).
+// phase distinguishes Branch 1's two runs of the same task: the read-only
+// refinement that produces TASK.md ("draft") and the write run kicked off when I
+// press start ("execute"). Other kinds always run a single "execute" phase.
+export type JobPhase = "draft" | "execute";
 
 export interface TaskJob {
   taskId: number;
   taskRunId: number;
-  mode: JobMode;
+  kind: TaskKind;
+  phase: JobPhase;
   repoFullName: string;
   subject: { type: SubjectType; number: number };
 }
 
 export const TASK_QUEUE_NAME = "tasks";
-
-// Parsed intent from a webhook (SPEC §6.3)
-export type AgentCommand = "run" | "review" | "stop" | "status";
-
-export interface Intent {
-  kind: TaskKind | null; // null for stop/status
-  command: AgentCommand | null; // null when triggered purely by a label
-  source: "command" | "label";
-}

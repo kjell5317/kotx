@@ -58,7 +58,7 @@ async function ensureImage(dk: Docker, image: string): Promise<void> {
 }
 
 /**
- * Run one short-lived codex-runner container. The container reads TASK.md from
+ * Run one short-lived codex-runner container. The container reads PROMPT.md from
  * the run-output dir and writes codex.jsonl there; it edits the worktree at
  * /workspace. Mounts only: worktree (rw), CODEX_HOME (ro), run-output (rw).
  * No Docker socket, no creds, no host home (SPEC §10.1/§14).
@@ -86,7 +86,7 @@ export async function runCodexContainer(opts: {
     // namespace inside it, so bypass it and let the container be the boundary.
     "--dangerously-bypass-approvals-and-sandbox",
     "-",
-    "< /run-output/TASK.md",
+    "< /run-output/PROMPT.md",
     "> /run-output/codex.jsonl 2>&1",
   ].join(" ");
 
