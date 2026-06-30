@@ -11,6 +11,12 @@ export const defaultsSchema = z.object({
     awaiting_approval_ttl_sec: z.number().int().positive(),
     repo_lock_buffer_sec: z.number().int().nonnegative(),
   }),
+  garbage_collection: z.object({
+    enabled: z.boolean().default(true),
+    run_retention_sec: z.number().int().nonnegative(),
+    sweep_interval_sec: z.number().int().positive(),
+    max_retained_run_bytes: z.number().int().positive().nullable().default(null),
+  }),
   container: z.object({
     cpus: z.number().positive(),
     memory: z.string(),

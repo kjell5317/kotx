@@ -9,6 +9,14 @@ timeouts:
   awaiting_approval_ttl_sec: 172800 # 48h, then auto-cancel the HITL + task
   repo_lock_buffer_sec: 120 # lock TTL = wall_clock + buffer
 
+garbage_collection:
+  enabled: true
+  # Deletes only finished, non-latest run dirs and matching disposable worktrees.
+  # Task dirs, git mirrors, latest run dirs, and active task runs are retained.
+  run_retention_sec: 604800 # 7 days
+  sweep_interval_sec: 3600 # 1 hour
+  max_retained_run_bytes: 10737418240 # 10 GiB across retainable non-latest runs
+
 container:
   cpus: 2
   memory: "4g"
