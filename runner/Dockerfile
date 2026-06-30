@@ -24,6 +24,12 @@ RUN printf 'APT::Sandbox::User "root";\n' > /etc/apt/apt.conf.d/99-kotx-no-sandb
 # binaries from the official image; pin the tag for reproducible builds.
 COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /uvx /usr/local/bin/
 
+# Docker CLI (client only — no daemon). When dev-containers are enabled the
+# worker runs a per-run `docker:dind` sidecar and points us at it via
+# DOCKER_HOST, so Codex can `docker run` a throwaway test DB etc. The client
+# binary is copied from the official docker image (no apt repo needed).
+COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
+
 # Install the Codex CLI. PIN the version. Verified against `codex exec --help`:
 # --json (JSONL), -s/--sandbox, prompt via '-' (stdin). NOTE: exec has NO
 # --ask-for-approval flag — approval policy is set via `-c approval_policy=...`.

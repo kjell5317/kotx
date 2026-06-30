@@ -294,8 +294,30 @@ Key decisions, all forced by reality during bring-up:
   read the auth). Verified Codex flags against `codex exec --help` 0.142.4.
 
 Outcome classification (output files are authoritative; exit code breaks ties):
-`AGENT_RESULT.md` present + exit 0 → `completed`; cancel/timeout kills →
+the expected primary artifact present (`AGENT_RESULT.md` for write-kinds, `TASK.md`
+for draft, `REVIEW.md` for review) + exit 0 → `completed`; cancel/timeout kills →
 `cancelled`/`timed_out`; else `failed`.
+
+### 9.1 Dev containers (DinD sidecar)
+
+When `container.dev_containers` is true, the worker gives each run a way to create
+test containers (e.g. a database) without exposing the host daemon:
+
+- A private per-run network `kotx-run-<runId>` and an anonymous volume for the
+  nested daemon's `/var/lib/docker` (overlay2 needs a real fs).
+- A **privileged** `docker:dind` sidecar `kotx-dind-<runId>` on that network,
+  aliased `dind`, serving a plain-TCP daemon at `tcp://dind:2375` (private network
+  only, no host mounts).
+- The runner stays **cap-dropped / no-new-privileges** and joins the same network
+  with `DOCKER_HOST=tcp://dind:2375` + the `docker` CLI; the run script waits for
+  the daemon before invoking Codex. The prompts tell Codex services are reachable
+  at host `dind`.
+
+**Cleanup is automatic and total:** at run end (including timeout/cancel) the
+worker removes the sidecar — which kills its daemon and every nested container —
+then the volume and the network. Privilege is confined to the throwaway sidecar;
+the code-execution container keeps the §12 hardening. When disabled, the runner
+uses the configured `container.network` and Codex has no Docker access.
 
 ---
 
@@ -347,6 +369,11 @@ Outcome classification (output files are authoritative; exit code breaks ties):
   /api/containers`) and the data dir read-write (to serve/edit `TASK.md`). The
   socket is read-only in intent (list/inspect) but is still host-level access;
   acceptable for a single-user personal tool, behind the `API_TOKEN` gate.
+- Dev-container trade-off (`container.dev_containers`): the runner still gets **no
+  host socket**; Codex's Docker access targets a per-run **privileged** `docker:dind`
+  sidecar isolated on a private network with no host mounts (§9.1). The sidecar is
+  host-root-adjacent if escaped, but it's throwaway and runs no untrusted workload
+  beyond what Codex (acting as me) starts. Set it false to remove Docker entirely.
 
 ### 12.1 JSON API
 

@@ -28,7 +28,9 @@ Your review was requested on this PR. Produce a thorough, useful code review.
    and read the surrounding code for context.
 2. Evaluate correctness, edge cases, security, tests, and clarity. You may build
    and run tests to verify behavior (network + root available; Node and Python 3
-   with `uv` preinstalled) — but make no source changes.
+   with `uv` preinstalled){{#if dockerAvailable}}, and Docker is available via a
+   private per-run daemon (`docker run …`; services reachable at host `dind`,
+   auto-destroyed at run end){{/if}} — but make no source changes.
 3. Write your review to `/workspace/REVIEW.md`. It will be posted **verbatim as a
    single PR comment**, so write it exactly as you want it to appear.
 

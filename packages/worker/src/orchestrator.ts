@@ -94,6 +94,7 @@ interface Guarded {
 /** Run the container with a wall-clock kill and a cancel-flag poller (SPEC §8). */
 async function runWithGuards(
   name: string,
+  runId: number,
   worktreePath: string,
   runOutputDir: string,
   mirror: string,
@@ -120,6 +121,7 @@ async function runWithGuards(
   try {
     const exitCode = await runCodexContainer({
       name,
+      runId,
       worktreePath,
       runOutputDir,
       mirrorPath: mirror,
@@ -175,12 +177,14 @@ async function runPrompt(
     title: ctx.subject.title,
     body: ctx.subject.body,
     comments: ctx.subject.comments,
+    dockerAvailable: loadDefaults().container.dev_containers,
     ...extra,
   });
   await writeFile(join(ctx.runOutputDir, "PROMPT.md"), prompt, "utf8");
   await ensureFreshAuth();
   return runWithGuards(
     ctx.containerName,
+    ctx.runId,
     ctx.worktreePath,
     ctx.runOutputDir,
     ctx.mirror,

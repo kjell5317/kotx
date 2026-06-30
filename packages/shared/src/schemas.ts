@@ -16,6 +16,12 @@ export const defaultsSchema = z.object({
     memory: z.string(),
     image: z.string(),
     network: z.string(),
+    // When true, each run gets a throwaway privileged docker:dind sidecar on a
+    // private per-run network; the (still hardened) runner talks to it via
+    // DOCKER_HOST so Codex can spin up test containers. Killing the sidecar at
+    // run end destroys every nested container — automatic cleanup.
+    dev_containers: z.boolean().default(false),
+    dind_image: z.string().default("docker:27-dind"),
   }),
   codex: z.object({
     sandbox: z.string(),

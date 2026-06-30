@@ -15,7 +15,12 @@ container:
   image: "codex-runner:latest"
   # Egress-only network for the runner. "bridge" = unrestricted egress, no creds
   # mounted (MVP default). Swap for a locked-down network in M5 (SPEC §14).
+  # Ignored when dev_containers is true (each run gets a private network instead).
   network: "bridge"
+  # Per-run docker:dind sidecar so Codex can create dev/test containers; all
+  # nested containers are destroyed when the run ends (SPEC §9.1).
+  dev_containers: true
+  dind_image: "docker:27-dind"
 
 codex:
   sandbox: "workspace-write"

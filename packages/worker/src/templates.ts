@@ -34,6 +34,8 @@ export interface TaskContext {
   isFollowUp?: boolean;
   // implement only: the approved TASK.md brief, embedded as the instructions.
   taskBrief?: string;
+  // true when the per-run dev-container (DinD) sidecar is enabled.
+  dockerAvailable?: boolean;
 }
 
 const FILE_BY_KIND: Record<PromptKind, string> = {

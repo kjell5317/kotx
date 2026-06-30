@@ -28,6 +28,12 @@ part of your work — leave no `<<<<<<<`/`=======`/`>>>>>>>` markers behind:
 - Network access is available and you run as root: install whatever the project
   needs (`uv`, `pip`, `npm`/`pnpm`/`yarn`, or system packages via `apt-get`).
   Node and Python 3 (with `uv`) are preinstalled.
+{{#if dockerAvailable}}
+- Docker is available via a private per-run daemon. You may `docker run`
+  throwaway services for tests (e.g. a database): publish a port and reach it
+  from here at host `dind` (e.g. `dind:5432`). Everything you start is destroyed
+  when the run ends — no need to clean up.
+{{/if}}
 - Do not touch git history or remotes. The host commits and pushes your branch
   after you finish.
 

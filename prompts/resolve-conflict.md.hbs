@@ -42,6 +42,10 @@ working tree** for you to resolve.
 
 - Work in `/workspace`. You may run any commands (build, tests, package managers).
   Network + root are available; Node and Python 3 (with `uv`) are preinstalled.
+{{#if dockerAvailable}}
+- Docker is available via a private per-run daemon (`docker run …`); services are
+  reachable at host `dind` and are destroyed when the run ends.
+{{/if}}
 - Do not touch git history or remotes — the host finalizes the merge commit and
   pushes after you finish.
 
