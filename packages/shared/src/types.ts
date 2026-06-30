@@ -40,7 +40,7 @@ export function displayStatus(state: TaskState): string {
       return "preparing task";
     case "draft":
     case "awaiting_approval":
-      return "waiting on my approval";
+      return "awaiting approval";
     case "awaiting_external":
       return "waiting on external approval";
     case "queued":

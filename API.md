@@ -63,7 +63,7 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" \
   "kind": "implement",             // "implement" | "resolve_conflict" | "review"
   "role": "assignee",              // "assignee" | "reviewer"
   "state": "draft",                // drafting|draft|queued|running|awaiting_approval|awaiting_external|done|failed|cancelled
-  "status": "waiting on my approval", // human-readable label for `state`
+  "status": "awaiting approval", // human-readable label for `state`
   "stateReason": null,             // reason for failed/cancelled, when set
   "branch": "31-add-metadata-index",
   "prNumber": null,                // set after a PR is opened from the pushed branch
@@ -88,7 +88,7 @@ Use `status` for display and the `can*` flags to decide which buttons to show.
 | status | meaning |
 | --- | --- |
 | `preparing task` | draft run in flight (`drafting`) |
-| `waiting on my approval` | a `TASK.md` is ready to start, or a `REVIEW.md` is ready to post |
+| `awaiting approval` | a `TASK.md` is ready to start, or a `REVIEW.md` is ready to post |
 | `queued` / `running` | execution is queued / a container is running |
 | `waiting on PR` | issue work has been pushed to `branch`, but no PR from that branch to the default branch has been found yet |
 | `in review` | a relevant PR is known; waiting for it to merge or close |

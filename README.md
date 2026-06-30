@@ -46,7 +46,7 @@ All `/api/*` routes require `Authorization: Bearer $API_TOKEN`.
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /api/tasks?scope=active\|all` | tasks where you're assignee or reviewer, with `status` (e.g. *waiting on my approval*, *waiting on external approval*) |
+| `GET /api/tasks?scope=active\|all` | tasks where you're assignee or reviewer, with `status` (e.g. *awaiting approval*, *in review*) |
 | `GET /api/tasks/:id` | one task |
 | `GET /api/tasks/:id/task` | the `TASK.md` brief |
 | `PUT /api/tasks/:id/task` | edit the brief before starting (draft state only) |

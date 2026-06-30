@@ -245,7 +245,7 @@ any:                                     … → failed | cancelled
 ```
 
 `displayStatus()` maps these to human labels — `draft`/`awaiting_approval` →
-"waiting on my approval"; API task DTOs map `awaiting_external` to "waiting on
+"awaiting approval"; API task DTOs map `awaiting_external` to "waiting on
 PR" when no PR number is known and "in review" once a PR is known or the subject
 itself is a PR.
 The active-slot guard (`uq_one_active_task`) covers
