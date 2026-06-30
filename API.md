@@ -39,6 +39,19 @@ curl -H "Authorization: Bearer $API_TOKEN" \
 Mutating endpoints return `{ ok: true }` on success. Errors return
 `{ "error": "…" }` with a `4xx`/`503` status (`409` = wrong state for the action).
 
+The two `PUT` endpoints take the new content as the **request body**. Send it as
+`Content-Type: text/markdown` (or `text/plain`) with the raw markdown, or as
+`application/json` with `{ "content": "…" }`. A `PUT` with no recognized
+content type is rejected by the server with `415 Unsupported Media Type`.
+
+```bash
+# raw markdown
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: text/markdown" \
+  --data-binary @TASK.md \
+  "https://code.kjellhanken.de/api/tasks/21/task"
+```
+
 ## The task object
 
 ```jsonc

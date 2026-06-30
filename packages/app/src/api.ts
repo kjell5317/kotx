@@ -303,10 +303,28 @@ function parseId(req: FastifyRequest, reply: FastifyReply): number | null {
   return id;
 }
 
-/** Extract a non-empty markdown body from a PUT: raw text or JSON {content}. */
+/**
+ * Extract a non-empty markdown body from a PUT. Accepts:
+ *  - text/markdown or text/plain → a raw string;
+ *  - application/json → a raw Buffer (the global HMAC parser), holding either a
+ *    JSON string, a `{ "content": "…" }` object, or just raw markdown.
+ */
 function bodyText(req: FastifyRequest): string | null {
   const b = req.body;
-  const text = typeof b === "string" ? b : (b as { content?: string })?.content;
+  let text: string | undefined;
+  if (typeof b === "string") {
+    text = b;
+  } else if (Buffer.isBuffer(b)) {
+    const raw = b.toString("utf8");
+    try {
+      const parsed = JSON.parse(raw);
+      text = typeof parsed === "string" ? parsed : parsed?.content;
+    } catch {
+      text = raw; // not JSON — treat the buffer as the markdown itself
+    }
+  } else if (b && typeof b === "object") {
+    text = (b as { content?: string }).content;
+  }
   return typeof text === "string" && text.trim() !== "" ? text : null;
 }
 

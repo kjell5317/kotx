@@ -22,6 +22,16 @@ app.addContentTypeParser(
   },
 );
 
+// Accept markdown/plain-text bodies (the PUT TASK.md / REVIEW.md endpoints) as a
+// raw string — Fastify otherwise 415s on any content type without a parser.
+app.addContentTypeParser(
+  ["text/markdown", "text/plain"],
+  { parseAs: "string" },
+  (_req, body, done) => {
+    done(null, body);
+  },
+);
+
 app.get("/healthz", async () => ({ ok: true }));
 
 // JSON API for the external frontend (GET/POST/PUT /api/*) — Bearer-gated.
