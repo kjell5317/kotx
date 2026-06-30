@@ -16,22 +16,25 @@ Triggers are plain GitHub events (or polling) keyed to your role on the subject
    issue/PR you're assigned to. A read-only **draft** Codex run produces
    `TASK.md` (brief + plan) and the task waits in `draft` ("waiting on my
    approval"). You review/edit it via the API and `POST …/start`; the **execute**
-   run then implements, pushes the branch, and comments — task → `awaiting_external`.
+   run then implements, pushes the branch, and comments. Issue work waits for a
+   manually opened PR from that branch, then waits for the PR to merge.
 2. **Conflict (Branch 2)** — a PR assigned to you is unmergeable (`mergeable_state
    = dirty`), detected on `pull_request` synchronize/open or a `push` to the
    default branch. Codex resolves the in-progress merge automatically (no
-   approval) and pushes → `awaiting_external`.
+   approval) and pushes; the task waits for that PR to merge or close.
 3. **Review (Branch 3)** — your review is requested on a PR, or such a PR gets new
    commits. A read-only review run writes `REVIEW.md`; the task waits in
-   `awaiting_approval`. `POST …/approve` posts it as a PR comment → `done`.
+   `awaiting_approval`. `POST …/approve` posts it as a PR comment, then the task
+   waits for that PR to merge or close.
 
-A merged/closed PR closes its open tasks (`done`/`cancelled`).
+Opened/reopened PRs from pushed issue branches are recorded on the task. A
+merged/closed PR closes its tracked open tasks (`done`/`cancelled`).
 
 ---
 
 ## 1. What's working
 
-Verified end-to-end on `TUM-Social-AI/AflaConnect` during bring-up:
+Verified during bring-up on a private allowlisted repository:
 
 - **Ingestion → queue → worker.** Webhook receiver verifies the HMAC signature,
   de-dupes deliveries, checks eligibility, creates a task, and enqueues it.
@@ -96,7 +99,7 @@ Ordered roughly by priority:
 ## 3. Goal
 
 A private coding agent that reacts to GitHub issues/PRs assigned to me, runs
-Codex in isolated Docker containers on a Hetzner VPS, and **pushes branches +
+Codex in isolated Docker containers on an operator-owned Docker host, and **pushes branches +
 posts plain summaries as me**. It never opens PRs, never merges, never deploys,
 and nothing it writes should read as machine-authored.
 
@@ -164,7 +167,12 @@ the three role-aware workflows in §0, driven by webhook events:
   → Branch 3.
 - `pull_request` synchronize/open + `push` to the default branch, for PRs assigned
   to me → Branch 2 (only when `mergeable_state = dirty`).
-- `pull_request` closed → close the subject's open tasks.
+- `pull_request` opened/reopened from a pushed issue branch → record the PR and
+  show the task as in review.
+- `pull_request` closed → close tracked open tasks as `done` when merged or
+  `cancelled` with a reason when closed unmerged.
+- Polling performs the same PR-open and PR-closed reconciliation, so lifecycle
+  state does not depend on receiving every webhook.
 
 ### 5.4 Eligibility
 Repo allowlisted + enabled; subject open; my role on the subject matches the
@@ -190,14 +198,16 @@ draft refresh, the execute run, and human edits.
 - **implement/execute**: pipe the approved (possibly edited) `TASK.md` as the
   brief → merge the default branch in → Codex implements → commit + push the
   branch → comment the `AGENT_RESULT.md` summary. Issue branch is GitHub-style
-  `<n>-<slug>` off default; PR follow-up uses the PR's own head branch. State →
-  `awaiting_external`.
+  `<n>-<slug>` off default; PR follow-up uses the PR's own head branch. Issue
+  work moves to `awaiting_external` as "waiting on PR" until a PR is opened from
+  that branch to the default branch, then "in review" until merge/close.
 - **resolve_conflict**: merge the default branch (leaving conflicts), Codex
-  resolves them, commit the merge + push → `awaiting_external`. Conflict-marker
-  safety net before commit.
+  resolves them, commit the merge + push → `awaiting_external` ("in review").
+  Conflict-marker safety net before commit.
 - **review** (read-only): write `/workspace/REVIEW.md` as a ready-to-post PR
   comment; saved to the task dir; state → `awaiting_approval`. Never commits.
-  `POST …/approve` posts it verbatim → `done`.
+  `POST …/approve` posts it verbatim → `awaiting_external` ("in review") until
+  the PR merges or closes.
 
 Read-only is structural: git creds never enter the container (SPEC §12), and the
 worker simply doesn't commit/push for draft/review. Fork PRs can't be pushed to,
@@ -228,18 +238,25 @@ Task states (`1700000003000_workflow_v3.sql` added `drafting`, `draft`,
 reused):
 
 ```text
-Branch 1: drafting → draft → (start) → queued → running → awaiting_external → done
-Branch 2:                                queued → running → awaiting_external → done
-Branch 3:                                queued → running → awaiting_approval → (approve) → done
-any:                                     … → failed | cancelled | timed_out
-any (via POST …/discard):                … → discarded
+Branch 1: drafting → draft → (start) → queued → running → awaiting_external(waiting on PR) → awaiting_external(in review) → done
+Branch 2:                                queued → running → awaiting_external(in review) → done
+Branch 3:                                queued → running → awaiting_approval → (approve) → awaiting_external(in review) → done
+any:                                     … → failed | cancelled
 ```
 
 `displayStatus()` maps these to human labels — `draft`/`awaiting_approval` →
-"waiting on my approval", `awaiting_external` → "waiting on external approval".
+"waiting on my approval"; API task DTOs map `awaiting_external` to "waiting on
+PR" when no PR number is known and "in review" once a PR is known or the subject
+itself is a PR.
 The active-slot guard (`uq_one_active_task`) covers
-`drafting,draft,queued,running,awaiting_approval`. `discarded` is terminal — like
-the other terminal states it's excluded from `scope=active` and frees the slot.
+`drafting,draft,queued,running,awaiting_approval`. `awaiting_external` and the
+terminal states are excluded from the active-slot guard so follow-up comments can
+create new work while a previous branch is waiting externally. `scope=active`
+still means all non-terminal tasks, including `awaiting_external`.
+
+Task terminal states are consolidated to `done`, `failed`, and `cancelled`.
+Timeouts become `failed` with `state_reason = 'the run timed out'`; discarded
+tasks become `cancelled` with a discard reason.
 
 ---
 
@@ -300,7 +317,8 @@ Key decisions, all forced by reality during bring-up:
 Outcome classification (output files are authoritative; exit code breaks ties):
 the expected primary artifact present (`AGENT_RESULT.md` for write-kinds, `TASK.md`
 for draft, `REVIEW.md` for review) + exit 0 → `completed`; cancel/timeout kills →
-`cancelled`/`timed_out`; else `failed`.
+run outcomes `cancelled`/`timed_out`, which map to task states `cancelled` and
+`failed` respectively; else `failed`.
 
 ### 9.1 Dev containers (DinD sidecar)
 
@@ -325,13 +343,13 @@ uses the configured `container.network` and Codex has no Docker access.
 
 ---
 
-## 10. Deployment (Hetzner + Docker + CI)
+## 10. Deployment (Docker + CI)
 
-- Single VPS (Ubuntu), Docker + Compose. Codex CLI logged in **on the host**
+- Single operator-owned host, Docker + Compose. Codex CLI logged in **on the host**
   once; auth copied/seeded into `CODEX_HOME`, then copied per-run into runners.
 - **CI** (`.github/workflows/build-images.yml`) builds + pushes `kotx-app` and
-  `kotx-runner` to GHCR on push to `main` / `v*` tags. `kotx-runner` pins the
-  Codex CLI version and `uv` version.
+  `kotx-runner` to GHCR under the operator's repository owner on push to `main`
+  / `v*` tags. `kotx-runner` pins the Codex CLI version and `uv` version.
 - Compose pulls `kotx-app` for app/worker; the worker **auto-pulls
   `kotx-runner`** if missing (won't replace an existing `:latest` — `docker pull`
   to refresh after a new build).
@@ -389,8 +407,8 @@ Endpoints: `GET /api/tasks?scope=active|all`, `GET /api/tasks/:id`,
 `GET|PUT /api/tasks/:id/task`, `GET|PUT /api/tasks/:id/review`,
 `GET /api/tasks/:id/prompt` (the exact Codex prompt) and `…/log` (the raw
 transcript) for the latest run, `POST /api/tasks/:id/{start,approve,stop,discard}`,
-`GET /api/containers`. `discard` moves a task of any kind to the terminal
-`discarded` state (hidden from `scope=active`). See [API.md](API.md) for the table.
+`GET /api/containers`. `discard` moves a task of any kind to `cancelled` with a
+discard reason. See [API.md](API.md) for the table.
 
 ---
 

@@ -1,5 +1,5 @@
-# Replace agent.yourdomain.com with your domain. Caddy fetches TLS automatically.
-code.kjellhanken.de {
+# Replace agent.example.com with your domain. Caddy fetches TLS automatically.
+agent.example.com {
 	encode gzip
 	reverse_proxy app:3000
 }

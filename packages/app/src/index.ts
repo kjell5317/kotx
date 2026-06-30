@@ -3,7 +3,7 @@ import Fastify from "fastify";
 import { registerApi } from "./api.js";
 import { normalize } from "./extract.js";
 import { ingest } from "./pipeline.js";
-import { startPoller } from "./poller.js";
+import { startPoller, startReconciler } from "./poller.js";
 import { verifySignature } from "./verify.js";
 
 const env = loadEnv();
@@ -79,8 +79,10 @@ app
   .then(() => {
     logger.info({ port: env.port }, "app listening");
     const poller = startPoller(); // null if no repos use poll mode
+    const reconciler = startReconciler(); // null if every enabled repo polls
     const shutdown = async () => {
       if (poller) clearInterval(poller);
+      if (reconciler) clearInterval(reconciler);
       await app.close();
       process.exit(0);
     };
