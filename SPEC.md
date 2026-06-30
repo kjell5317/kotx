@@ -405,8 +405,10 @@ uses the configured `container.network` and Codex has no Docker access.
 503 if `API_TOKEN` is unset). `CORS_ORIGIN` enables the browser frontend.
 Endpoints: `GET /api/tasks?scope=active|all`, `GET /api/tasks/:id`,
 `GET|PUT /api/tasks/:id/task`, `GET|PUT /api/tasks/:id/review`,
-`GET /api/tasks/:id/prompt` (the exact Codex prompt) and `…/log` (the raw
-transcript) for the latest run, `POST /api/tasks/:id/{start,approve,stop,discard}`,
+`GET /api/tasks/:id/prompt` (the exact Codex prompt) and `…/log` (a JSON page
+of the latest run transcript, newest 200 JSONL entries by default; `limit`
+1..1000 and `before` byte cursor for older pages),
+`POST /api/tasks/:id/{start,approve,stop,discard}`,
 `GET /api/containers`. `discard` moves a task of any kind to `cancelled` with a
 discard reason. See [API.md](API.md) for the table.
 
