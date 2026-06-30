@@ -1,5 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { open, readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import cors from "@fastify/cors";
 import {
@@ -109,6 +109,246 @@ async function readLatestRunArtifact(
   return readFileOrNull(join(runDirFor(loadEnv().agentDataDir, run.id), name));
 }
 
+const DEFAULT_LOG_LIMIT = 200;
+const MAX_LOG_LIMIT = 1000;
+const LOG_READ_CHUNK_BYTES = 64 * 1024;
+
+interface LogQuery {
+  limit: number;
+  before?: number;
+}
+
+interface LogLine {
+  startOffset: number;
+  endOffset: number;
+  bytes: Buffer;
+}
+
+interface LogEntry {
+  offset: number;
+  record?: unknown;
+  raw?: string;
+  parseError?: string;
+}
+
+interface LogPage {
+  runId: number;
+  entries: LogEntry[];
+  page: {
+    limit: number;
+    count: number;
+    startOffset: number;
+    endOffset: number;
+    sizeBytes: number;
+    hasMoreBefore: boolean;
+    hasMoreAfter: boolean;
+    nextBefore: number | null;
+  };
+}
+
+class LogQueryError extends Error {}
+
+async function readLatestRunLogPage(
+  taskId: number,
+  query: LogQuery,
+): Promise<LogPage | null> {
+  const run = await getLatestRun(taskId);
+  if (!run) return null;
+  const path = join(runDirFor(loadEnv().agentDataDir, run.id), "codex.jsonl");
+  try {
+    return await readLogFilePage(run.id, path, query);
+  } catch (err) {
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      "code" in err &&
+      (err as { code?: string }).code === "ENOENT"
+    ) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+export async function readLogFilePage(
+  runId: number,
+  path: string,
+  query: LogQuery,
+): Promise<LogPage> {
+  const fh = await open(path, "r");
+  try {
+    const stats = await fh.stat();
+    const sizeBytes = stats.size;
+    const endOffset = query.before ?? sizeBytes;
+    if (endOffset > sizeBytes) {
+      throw new LogQueryError(`before must be <= log size (${sizeBytes})`);
+    }
+    if (
+      query.before !== undefined &&
+      endOffset !== 0 &&
+      endOffset !== sizeBytes &&
+      !(await isLineBoundary(fh, endOffset))
+    ) {
+      throw new LogQueryError("before must be a line boundary cursor");
+    }
+    if (endOffset === 0 || query.limit === 0) {
+      return {
+        runId,
+        entries: [],
+        page: {
+          limit: query.limit,
+          count: 0,
+          startOffset: 0,
+          endOffset,
+          sizeBytes,
+          hasMoreBefore: false,
+          hasMoreAfter: endOffset < sizeBytes,
+          nextBefore: null,
+        },
+      };
+    }
+
+    let start = endOffset;
+    let buffer = Buffer.alloc(0);
+    let lines: LogLine[] = [];
+    while (start > 0) {
+      const chunkStart = Math.max(0, start - LOG_READ_CHUNK_BYTES);
+      const chunk = Buffer.alloc(start - chunkStart);
+      await fh.read(chunk, 0, chunk.length, chunkStart);
+      buffer = Buffer.concat([chunk, buffer]);
+      start = chunkStart;
+      lines = extractCompleteLines(buffer, start, endOffset);
+      if (lines.length >= query.limit) break;
+    }
+
+    const pageLines = lines.slice(-query.limit);
+    const startOffset = pageLines[0]?.startOffset ?? endOffset;
+    return {
+      runId,
+      entries: pageLines.map(logLineToEntry),
+      page: {
+        limit: query.limit,
+        count: pageLines.length,
+        startOffset,
+        endOffset,
+        sizeBytes,
+        hasMoreBefore: startOffset > 0,
+        hasMoreAfter: endOffset < sizeBytes,
+        nextBefore: startOffset > 0 ? startOffset : null,
+      },
+    };
+  } finally {
+    await fh.close();
+  }
+}
+
+async function isLineBoundary(
+  fh: Awaited<ReturnType<typeof open>>,
+  offset: number,
+): Promise<boolean> {
+  const byte = Buffer.alloc(1);
+  await fh.read(byte, 0, 1, offset - 1);
+  return byte[0] === 10;
+}
+
+function extractCompleteLines(
+  bytes: Buffer,
+  bufferStartOffset: number,
+  endOffset: number,
+): LogLine[] {
+  const lines: LogLine[] = [];
+  let lineStart = 0;
+  for (let i = 0; i < bytes.length; i += 1) {
+    if (bytes[i] !== 10) continue;
+    if (i > lineStart) {
+      lines.push({
+        startOffset: bufferStartOffset + lineStart,
+        endOffset: bufferStartOffset + i,
+        bytes: bytes.subarray(lineStart, i),
+      });
+    }
+    lineStart = i + 1;
+  }
+  if (lineStart < bytes.length) {
+    lines.push({
+      startOffset: bufferStartOffset + lineStart,
+      endOffset,
+      bytes: bytes.subarray(lineStart),
+    });
+  }
+  return bufferStartOffset === 0 ? lines : lines.slice(1);
+}
+
+function logLineToEntry(line: LogLine): LogEntry {
+  const raw = line.bytes.toString("utf8");
+  try {
+    return { offset: line.startOffset, record: JSON.parse(raw) };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "invalid JSON";
+    return { offset: line.startOffset, raw, parseError: message };
+  }
+}
+
+function parseLogQuery(
+  req: FastifyRequest,
+  reply: FastifyReply,
+): LogQuery | null {
+  const query = req.query as Record<string, unknown>;
+  const limit = parseOptionalPositiveInteger(
+    query.limit,
+    "limit",
+    DEFAULT_LOG_LIMIT,
+    MAX_LOG_LIMIT,
+  );
+  if (typeof limit === "string") {
+    reply.code(400).send({ error: limit });
+    return null;
+  }
+
+  const before = parseOptionalNonNegativeInteger(query.before, "before");
+  if (typeof before === "string") {
+    reply.code(400).send({ error: before });
+    return null;
+  }
+
+  return before === undefined ? { limit } : { limit, before };
+}
+
+function parseOptionalPositiveInteger(
+  value: unknown,
+  name: string,
+  fallback: number,
+  max: number,
+): number | string {
+  if (value === undefined) return fallback;
+  const parsed = parseSingleInteger(value, name);
+  if (typeof parsed === "string") return parsed;
+  if (parsed <= 0) return `${name} must be greater than 0`;
+  if (parsed > max) return `${name} must be <= ${max}`;
+  return parsed;
+}
+
+function parseOptionalNonNegativeInteger(
+  value: unknown,
+  name: string,
+): number | string | undefined {
+  if (value === undefined) return undefined;
+  const parsed = parseSingleInteger(value, name);
+  if (typeof parsed === "string") return parsed;
+  if (parsed < 0) return `${name} must be >= 0`;
+  return parsed;
+}
+
+function parseSingleInteger(value: unknown, name: string): number | string {
+  if (Array.isArray(value)) return `${name} must be provided once`;
+  if (typeof value !== "string" || !/^\d+$/.test(value)) {
+    return `${name} must be an integer`;
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) return `${name} is too large`;
+  return parsed;
+}
+
 let docker: Docker | undefined;
 function getDocker(): Docker {
   if (!docker) docker = new Docker();
@@ -201,14 +441,23 @@ export function registerApi(app: FastifyInstance): void {
     return reply.type("text/markdown").send(text);
   });
 
-  // The raw Codex transcript (JSONL) for the latest run — useful for failures.
+  // A bounded JSON view of the latest Codex transcript, newest page by default.
   app.get("/api/tasks/:id/log", async (req, reply) => {
     if (!requireAuth(req, reply)) return;
     const id = parseId(req, reply);
     if (id === null) return;
-    const text = await readLatestRunArtifact(id, "codex.jsonl");
-    if (text === null) return reply.code(404).send({ error: "no log yet" });
-    return reply.type("application/x-ndjson").send(text);
+    const query = parseLogQuery(req, reply);
+    if (query === null) return;
+    try {
+      const page = await readLatestRunLogPage(id, query);
+      if (page === null) return reply.code(404).send({ error: "no log yet" });
+      return page;
+    } catch (err) {
+      if (err instanceof LogQueryError) {
+        return reply.code(400).send({ error: err.message });
+      }
+      throw err;
+    }
   });
 
   // Branch 1: start the implementation for a reviewed draft.

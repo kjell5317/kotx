@@ -9,6 +9,7 @@ import {
   TASK_QUEUE_NAME,
   type TaskJob,
 } from "@kotx/shared";
+import { startGarbageCollector } from "./garbageCollector.js";
 import { processJob } from "./orchestrator.js";
 
 loadEnv();
@@ -31,8 +32,11 @@ worker.on("failed", (job, err) => {
 });
 worker.on("ready", () => logger.info("worker ready"));
 
+const garbageCollector = startGarbageCollector();
+
 async function shutdown(signal: string): Promise<void> {
   logger.info({ signal }, "shutting down worker");
+  await garbageCollector.stop();
   await worker.close();
   await closePool();
   await getRedis().quit();
