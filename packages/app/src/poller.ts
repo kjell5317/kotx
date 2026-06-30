@@ -1,6 +1,7 @@
 import {
   getOctokit,
   hasAnyTask,
+  hasReviewTask,
   isAgentComment,
   findTasksTrackingAnyPr,
   loadRepos,
@@ -29,6 +30,16 @@ const RECONCILE_INTERVAL_MS =
 const INITIAL_LOOKBACK_MS = 60 * 60 * 1000;
 
 const commentCursor = new Map<string, string>();
+
+// Per repo#pr, the PR head SHA we last triggered a review for. In-memory like
+// commentCursor: lets poll mode re-review when new commits land (what webhooks
+// get for free from `synchronize`). On restart we re-seed from the current head
+// without re-reviewing, so only genuinely new commits re-trigger.
+const reviewedHead = new Map<string, string>();
+
+function prKey(repoFullName: string, prNumber: number): string {
+  return `${repoFullName}#${prNumber}`;
+}
 
 /**
  * Periodic PR-lifecycle reconciliation for webhook-only repos (`poll: false`).
@@ -171,9 +182,28 @@ async function pollPulls(
       baseRef: pr.base?.ref,
     };
     const seen = await hasAnyTask(repo.full_name, "pull_request", pr.number);
-    if (subject.requestedReviewers.includes(me)) {
-      // review once per subject via poll (re-review on new commits needs webhooks)
-      if (!seen) await startReview(repo, subject, me);
+    const headSha = pr.head?.sha ?? "";
+    // GitHub drops me from requested_reviewers once I've reviewed, so a
+    // re-review on new commits is keyed on an existing review task too.
+    const wantsReview =
+      subject.requestedReviewers.includes(me) ||
+      (await hasReviewTask(repo.full_name, pr.number));
+    if (wantsReview) {
+      // Re-review when the head advances past what we last reviewed. The SHA
+      // gate stands in for the `synchronize` event webhooks get; without it a
+      // review sitting in awaiting_approval would be re-run every tick.
+      const key = prKey(repo.full_name, pr.number);
+      const lastSha = reviewedHead.get(key);
+      const advanced =
+        lastSha !== undefined && headSha !== "" && headSha !== lastSha;
+      if (!seen || advanced) {
+        const res = await startReview(repo, subject, me);
+        if (res.status === "enqueued") reviewedHead.set(key, headSha);
+      } else if (lastSha === undefined) {
+        // first sighting of an already-handled PR (or post-restart): seed the
+        // baseline so only genuinely new commits re-trigger.
+        reviewedHead.set(key, headSha);
+      }
     } else if (subject.assignees.includes(me)) {
       // conflict check is self-limiting (only fires when dirty + no active task)
       await maybeResolveConflict(repo, subject, me);
