@@ -22,7 +22,7 @@ curl -H "Authorization: Bearer $API_TOKEN" \
 | Method & path | Returns / does |
 | --- | --- |
 | `GET /healthz` | `{ ok: true }` — unauthenticated liveness check |
-| `POST /api/runs` | manually enqueue an `implement`, `review`, or `resolve` run by GitHub issue/PR number. Body: `{ "type": "implement" \| "review" \| "resolve", "number": 123 }`. Returns `202` with `{ status: "enqueued", taskId }` |
+| `POST /api/runs` | manually enqueue an `implement`, `review`, or `resolve` run by GitHub issue/PR number. Body: `{ "type": "implement" \| "review" \| "resolve", "number": 123, "repo"?: "owner/name" }`. `repo` is optional with one enabled repo, required with several. Returns `202` with `{ status: "enqueued", taskId }` |
 | `GET /api/tasks?scope=active\|all` | array of tasks where I'm assignee or reviewer. `active` (default) = non-terminal only; `all` = everything |
 | `GET /api/tasks/:id` | one task object |
 | `GET /api/tasks/:id/task` | the `TASK.md` brief (markdown). `404` if not generated yet |
@@ -70,20 +70,22 @@ server still checks that the requested action applies:
 - `resolve` accepts only an open PR that is currently conflicting; mergeable PRs
   return `409`.
 
-The request body accepts only `type` and `number`:
+The request body accepts `type`, `number`, and an optional `repo`:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  --data '{"type":"review","number":42}' \
+  --data '{"type":"review","number":42,"repo":"owner/name"}' \
   "https://agent.example.com/api/runs"
 ```
 
-Because the body contains no repository field, the endpoint requires exactly one
-enabled repo in `config/repos.yml`. With zero or multiple enabled repos it
-returns `409`. Missing GitHub numbers return `404`; closed subjects, plain
-issues for `review`/`resolve`, mergeable PRs for `resolve`, and active-task
-conflicts return `409` with the pipeline `reason`.
+`repo` is optional when exactly one repo is enabled in `config/repos.yml` (it's
+inferred). When more than one repo is enabled, `repo` is **required** — omitting
+it returns `409` with the list of enabled repos. A `repo` that isn't in the
+enabled allowlist returns `409`. With zero enabled repos it returns `409`.
+Missing GitHub numbers return `404`; closed subjects, plain issues for
+`review`/`resolve`, mergeable PRs for `resolve`, and active-task conflicts
+return `409` with the pipeline `reason`.
 
 ## Log pagination
 

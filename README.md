@@ -48,7 +48,7 @@ All `/api/*` routes require `Authorization: Bearer $API_TOKEN`.
 
 | Method & path | Purpose |
 | --- | --- |
-| `POST /api/runs` | manually enqueue `implement`, `review`, or `resolve` for a GitHub issue/PR number |
+| `POST /api/runs` | manually enqueue `implement`, `review`, or `resolve` for a GitHub issue/PR number (add `"repo": "owner/name"` when more than one repo is enabled) |
 | `GET /api/tasks?scope=active\|all` | tasks where you're assignee or reviewer, with `status` (e.g. *awaiting approval*, *in review*) |
 | `GET /api/tasks/:id` | one task |
 | `GET /api/tasks/:id/task` | the `TASK.md` brief |

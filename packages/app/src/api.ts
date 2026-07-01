@@ -405,6 +405,8 @@ type ManualRunType = "implement" | "review" | "resolve";
 interface ManualRunRequest {
   type: ManualRunType;
   number: number;
+  // optional "owner/name" — required only when more than one repo is enabled.
+  repo?: string;
 }
 
 function parseManualRunRequest(
@@ -418,14 +420,14 @@ function parseManualRunRequest(
   }
 
   const unexpected = Object.keys(parsed).filter(
-    (key) => key !== "type" && key !== "number",
+    (key) => key !== "type" && key !== "number" && key !== "repo",
   );
   if (unexpected.length > 0) {
     reply.code(400).send({ error: `unexpected field: ${unexpected[0]}` });
     return null;
   }
 
-  const { type, number } = parsed;
+  const { type, number, repo } = parsed;
   if (type !== "implement" && type !== "review" && type !== "resolve") {
     reply
       .code(400)
@@ -440,7 +442,11 @@ function parseManualRunRequest(
     reply.code(400).send({ error: "number must be a positive integer" });
     return null;
   }
-  return { type, number };
+  if (repo !== undefined && (typeof repo !== "string" || repo.trim() === "")) {
+    reply.code(400).send({ error: 'repo must be a non-empty "owner/name" string' });
+    return null;
+  }
+  return { type, number, ...(repo === undefined ? {} : { repo }) };
 }
 
 function parseJsonObjectBody(body: unknown): Record<string, unknown> | string {
@@ -466,15 +472,33 @@ function parseJsonObjectBody(body: unknown): Record<string, unknown> | string {
   return obj as Record<string, unknown>;
 }
 
-function getManualRunRepo(reply: FastifyReply): RepoConfig | null {
+function getManualRunRepo(
+  reply: FastifyReply,
+  requested?: string,
+): RepoConfig | null {
   const enabled = [...loadRepos().values()].filter((repo) => repo.enabled);
   if (enabled.length === 0) {
     reply.code(409).send({ error: "no enabled repository configured" });
     return null;
   }
+
+  // Explicit repo: must be one of the enabled allowlist entries.
+  if (requested !== undefined) {
+    const repo = getEnabledRepo(requested);
+    if (!repo) {
+      reply.code(409).send({
+        error: `repo "${requested}" is not an enabled repository`,
+        repos: enabled.map((r) => r.full_name),
+      });
+      return null;
+    }
+    return repo;
+  }
+
+  // No repo given: only unambiguous when a single repo is enabled.
   if (enabled.length > 1) {
     reply.code(409).send({
-      error: "manual runs require exactly one enabled repository",
+      error: "multiple repositories enabled — specify \"repo\": \"owner/name\"",
       repos: enabled.map((repo) => repo.full_name),
     });
     return null;
@@ -603,7 +627,7 @@ export function registerApi(app: FastifyInstance): void {
     if (!requireAuth(req, reply)) return;
     const input = parseManualRunRequest(req, reply);
     if (!input) return;
-    const repo = getManualRunRepo(reply);
+    const repo = getManualRunRepo(reply, input.repo);
     if (!repo) return;
 
     let subject: NormalizedSubject | null;
