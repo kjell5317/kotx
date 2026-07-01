@@ -1,4 +1,5 @@
 import {
+  getLatestReviewTask,
   getOctokit,
   hasAnyTask,
   hasReviewTask,
@@ -32,16 +33,6 @@ const INITIAL_LOOKBACK_MS = 60 * 60 * 1000;
 
 const commentCursor = new Map<string, string>();
 const prReviewCursor = new Map<string, string>();
-
-// Per repo#pr, the PR head SHA we last triggered a review for. In-memory like
-// commentCursor: lets poll mode re-review when new commits land (what webhooks
-// get for free from `synchronize`). On restart we re-seed from the current head
-// without re-reviewing, so only genuinely new commits re-trigger.
-const reviewedHead = new Map<string, string>();
-
-function prKey(repoFullName: string, prNumber: number): string {
-  return `${repoFullName}#${prNumber}`;
-}
 
 /**
  * Periodic PR-lifecycle reconciliation for webhook-only repos (`poll: false`).
@@ -188,25 +179,18 @@ async function pollPulls(
     const headSha = pr.head?.sha ?? "";
     // GitHub drops me from requested_reviewers once I've reviewed, so a
     // re-review on new commits is keyed on an existing review task too.
+    const reviewTask = await getLatestReviewTask(repo.full_name, pr.number);
     const wantsReview =
-      subject.requestedReviewers.includes(me) ||
-      (await hasReviewTask(repo.full_name, pr.number));
+      subject.requestedReviewers.includes(me) || reviewTask !== undefined;
     if (wantsReview) {
-      // Re-review when the head advances past what we last reviewed. The SHA
-      // gate stands in for the `synchronize` event webhooks get; without it a
-      // review sitting in awaiting_approval would be re-run every tick.
-      const key = prKey(repo.full_name, pr.number);
-      const lastSha = reviewedHead.get(key);
+      // Re-review when the head advances past the SHA the last review ran on
+      // (stored on the task — durable across restarts, unlike an in-memory
+      // cache). This is the poll-mode equivalent of the webhook `synchronize`.
       const advanced =
-        lastSha !== undefined && headSha !== "" && headSha !== lastSha;
-      if (!seen || advanced) {
-        const res = await startReview(repo, subject, me);
-        if (res.status === "enqueued") reviewedHead.set(key, headSha);
-      } else if (lastSha === undefined) {
-        // first sighting of an already-handled PR (or post-restart): seed the
-        // baseline so only genuinely new commits re-trigger.
-        reviewedHead.set(key, headSha);
-      }
+        reviewTask?.reviewed_head_sha != null &&
+        headSha !== "" &&
+        headSha !== reviewTask.reviewed_head_sha;
+      if (!seen || advanced) await startReview(repo, subject, me);
     } else if (subject.assignees.includes(me)) {
       // conflict check is self-limiting (only fires when dirty + no active task)
       await maybeResolveConflict(repo, subject, me);
@@ -272,7 +256,11 @@ async function pollComments(
       const it = issue.data;
       if (it.state !== "open") continue;
       const assignees = logins(it.assignees);
-      if (!assignees.includes(me)) continue;
+      // A comment on a PR I'm reviewing → re-review; otherwise a comment on a
+      // subject I'm assigned to → Branch 1 follow-up.
+      const iReview =
+        !!it.pull_request && (await hasReviewTask(repo.full_name, it.number));
+      if (!iReview && !assignees.includes(me)) continue;
       const subject: NormalizedSubject = {
         type: it.pull_request ? "pull_request" : "issue",
         number: it.number,
@@ -282,13 +270,17 @@ async function pollComments(
         title: it.title ?? "",
         body: it.body ?? "",
       };
-      const followUpInput: DraftFollowUpInput = {
-        body: c.body ?? "",
-        authorLogin: author,
-        htmlUrl: c.html_url ?? null,
-        eventLabel: "comment",
-      };
-      await startDraft(repo, subject, author, c.html_url ?? null, followUpInput);
+      if (iReview) {
+        await startReview(repo, subject, author);
+      } else {
+        const followUpInput: DraftFollowUpInput = {
+          body: c.body ?? "",
+          authorLogin: author,
+          htmlUrl: c.html_url ?? null,
+          eventLabel: "comment",
+        };
+        await startDraft(repo, subject, author, c.html_url ?? null, followUpInput);
+      }
     } catch (err) {
       logger.warn({ err, issueNumber }, "poll: failed to handle comment");
     }
@@ -322,7 +314,11 @@ async function pollPrReviewActivity(
   for (const pr of prs.data) {
     if (!isAtOrAfterCursor(pr.updated_at, cursor)) break;
     const assignees = logins(pr.assignees);
-    if (!assignees.includes(me)) continue;
+    const isAssignee = assignees.includes(me);
+    // A PR I'm reviewing → new review activity re-reviews (Branch 3); a PR I'm
+    // assigned to → each new review/comment is a Branch 1 follow-up.
+    const iReview = await hasReviewTask(repo.full_name, pr.number);
+    if (!isAssignee && !iReview) continue;
     const subject: NormalizedSubject = {
       type: "pull_request",
       number: pr.number,
@@ -334,6 +330,17 @@ async function pollPrReviewActivity(
       headRef: pr.head?.ref,
       headRepoFullName: pr.head?.repo?.full_name ?? undefined,
       baseRef: pr.base?.ref,
+    };
+    // Route each fresh item: assignees get a per-item Branch 1 follow-up; for a
+    // PR I'm reviewing we re-review once per tick regardless of item count.
+    let reviewerActivity = false;
+    const handleItem = async (
+      author: string,
+      htmlUrl: string | null,
+      input: DraftFollowUpInput,
+    ): Promise<void> => {
+      if (isAssignee) await startDraft(repo, subject, author, htmlUrl, input);
+      else reviewerActivity = true;
     };
 
     try {
@@ -350,14 +357,13 @@ async function pollPrReviewActivity(
         const fresh = await recordDelivery(`poll-pr-review-${r.id}`, "pull_request_review");
         if (!fresh) continue;
         const author = r.user?.login ?? "";
-        const followUpInput: DraftFollowUpInput = {
+        await handleItem(author, r.html_url ?? null, {
           body,
           authorLogin: author,
           htmlUrl: r.html_url ?? null,
           eventLabel: "review",
           location: r.state ? `review: ${String(r.state).toLowerCase()}` : undefined,
-        };
-        await startDraft(repo, subject, author, r.html_url ?? null, followUpInput);
+        });
       }
 
       const inline = await octokit.pulls.listReviewComments({
@@ -376,15 +382,16 @@ async function pollPrReviewActivity(
         );
         if (!fresh) continue;
         const author = c.user?.login ?? "";
-        const followUpInput: DraftFollowUpInput = {
+        await handleItem(author, c.html_url ?? null, {
           body,
           authorLogin: author,
           htmlUrl: c.html_url ?? null,
           eventLabel: "inline review comment",
           location: inlineLocation(c),
-        };
-        await startDraft(repo, subject, author, c.html_url ?? null, followUpInput);
+        });
       }
+
+      if (reviewerActivity) await startReview(repo, subject, me);
     } catch (err) {
       logger.warn({ err, prNumber: pr.number }, "poll: failed to handle PR review activity");
     }

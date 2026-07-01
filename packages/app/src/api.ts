@@ -11,6 +11,7 @@ import {
   getLatestRun,
   getOctokit,
   getTask,
+  loadRepos,
   listTasks,
   loadEnv,
   logger,
@@ -20,14 +21,23 @@ import {
   setCancelFlag,
   setTaskPrAndState,
   setTaskState,
+  splitRepo,
   taskDirFor,
   TERMINAL_STATES,
   updateBranchFromBase,
+  type RepoConfig,
   type Task,
   type TaskListItem,
 } from "@kotx/shared";
 import Docker from "dockerode";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { NormalizedSubject } from "./extract.js";
+import {
+  maybeResolveConflict,
+  startDraft,
+  startReview,
+  type IngestResult,
+} from "./pipeline.js";
 
 function eq(a: string, b: string): boolean {
   const ab = Buffer.from(a);
@@ -100,7 +110,6 @@ function taskDto(t: TaskListItem) {
             ? "pr"
             : null
         : null,
-    canStop: t.state === "queued" || t.state === "running" || t.state === "drafting",
     // any non-terminal task can be dismissed (e.g. one stuck "in review")
     canDiscard: !TERMINAL_STATES.has(t.state),
   };
@@ -391,6 +400,193 @@ function parseSingleInteger(value: unknown, name: string): number | string {
   return parsed;
 }
 
+type ManualRunType = "implement" | "review" | "resolve";
+
+interface ManualRunRequest {
+  type: ManualRunType;
+  number: number;
+}
+
+function parseManualRunRequest(
+  req: FastifyRequest,
+  reply: FastifyReply,
+): ManualRunRequest | null {
+  const parsed = parseJsonObjectBody(req.body);
+  if (typeof parsed === "string") {
+    reply.code(400).send({ error: parsed });
+    return null;
+  }
+
+  const unexpected = Object.keys(parsed).filter(
+    (key) => key !== "type" && key !== "number",
+  );
+  if (unexpected.length > 0) {
+    reply.code(400).send({ error: `unexpected field: ${unexpected[0]}` });
+    return null;
+  }
+
+  const { type, number } = parsed;
+  if (type !== "implement" && type !== "review" && type !== "resolve") {
+    reply
+      .code(400)
+      .send({ error: 'type must be "implement", "review", or "resolve"' });
+    return null;
+  }
+  if (
+    typeof number !== "number" ||
+    !Number.isSafeInteger(number) ||
+    number <= 0
+  ) {
+    reply.code(400).send({ error: "number must be a positive integer" });
+    return null;
+  }
+  return { type, number };
+}
+
+function parseJsonObjectBody(body: unknown): Record<string, unknown> | string {
+  let obj: unknown;
+  if (Buffer.isBuffer(body)) {
+    try {
+      obj = JSON.parse(body.toString("utf8"));
+    } catch {
+      return "invalid json";
+    }
+  } else if (typeof body === "string") {
+    try {
+      obj = JSON.parse(body);
+    } catch {
+      return "invalid json";
+    }
+  } else {
+    obj = body;
+  }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+    return "body must be a JSON object";
+  }
+  return obj as Record<string, unknown>;
+}
+
+function getManualRunRepo(reply: FastifyReply): RepoConfig | null {
+  const enabled = [...loadRepos().values()].filter((repo) => repo.enabled);
+  if (enabled.length === 0) {
+    reply.code(409).send({ error: "no enabled repository configured" });
+    return null;
+  }
+  if (enabled.length > 1) {
+    reply.code(409).send({
+      error: "manual runs require exactly one enabled repository",
+      repos: enabled.map((repo) => repo.full_name),
+    });
+    return null;
+  }
+  const repo = getEnabledRepo(enabled[0]!.full_name);
+  if (!repo) {
+    reply.code(409).send({ error: "repository is not enabled" });
+    return null;
+  }
+  return repo;
+}
+
+function logins(
+  arr: Array<{ login?: string | null } | null> | null | undefined,
+): string[] {
+  return (arr ?? [])
+    .map((item) => item?.login)
+    .filter((login): login is string => !!login);
+}
+
+function normalizeIssue(issue: {
+  number: number;
+  state?: string;
+  assignees?: Array<{ login?: string | null } | null> | null;
+  title?: string | null;
+  body?: string | null;
+}): NormalizedSubject {
+  return {
+    type: "issue",
+    number: issue.number,
+    state: issue.state === "closed" ? "closed" : "open",
+    assignees: logins(issue.assignees),
+    requestedReviewers: [],
+    title: issue.title ?? "",
+    body: issue.body ?? "",
+  };
+}
+
+function normalizePull(pr: {
+  number: number;
+  state?: string;
+  assignees?: Array<{ login?: string | null } | null> | null;
+  requested_reviewers?: Array<{ login?: string | null } | null> | null;
+  title?: string | null;
+  body?: string | null;
+  head?: {
+    ref?: string | null;
+    repo?: { full_name?: string | null } | null;
+  } | null;
+  base?: { ref?: string | null } | null;
+  merged?: boolean | null;
+}): NormalizedSubject {
+  return {
+    type: "pull_request",
+    number: pr.number,
+    state: pr.state === "closed" ? "closed" : "open",
+    assignees: logins(pr.assignees),
+    requestedReviewers: logins(pr.requested_reviewers),
+    title: pr.title ?? "",
+    body: pr.body ?? "",
+    headRef: pr.head?.ref ?? undefined,
+    headRepoFullName: pr.head?.repo?.full_name ?? undefined,
+    baseRef: pr.base?.ref ?? undefined,
+    merged: !!pr.merged,
+  };
+}
+
+function isNotFound(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { status?: number }).status === 404
+  );
+}
+
+async function fetchGithubSubject(
+  repo: RepoConfig,
+  number: number,
+): Promise<NormalizedSubject | null> {
+  const [owner, name] = splitRepo(repo.full_name);
+  const octokit = getOctokit();
+  try {
+    const { data: issue } = await octokit.issues.get({
+      owner,
+      repo: name,
+      issue_number: number,
+    });
+    if (!issue.pull_request) return normalizeIssue(issue);
+    const { data: pr } = await octokit.pulls.get({
+      owner,
+      repo: name,
+      pull_number: number,
+    });
+    return normalizePull(pr);
+  } catch (err) {
+    if (isNotFound(err)) return null;
+    throw err;
+  }
+}
+
+function ignoredStatus(reason: string): number {
+  return reason === "repo-not-enabled" ? 404 : 409;
+}
+
+function sendManualRunResult(reply: FastifyReply, result: IngestResult) {
+  if (result.status === "enqueued") return reply.code(202).send(result);
+  if (result.status === "handled") return reply.code(200).send(result);
+  return reply
+    .code(ignoredStatus(result.reason))
+    .send({ error: result.reason, ...result });
+}
+
 let docker: Docker | undefined;
 function getDocker(): Docker {
   if (!docker) docker = new Docker();
@@ -400,6 +596,56 @@ function getDocker(): Docker {
 export function registerApi(app: FastifyInstance): void {
   const origin = loadEnv().corsOrigin;
   app.register(cors, { origin: origin ?? false, methods: ["GET", "POST", "PUT"] });
+
+  // Manually enqueue a run for the configured repo, bypassing role gates while
+  // still requiring the requested action to fit the GitHub subject.
+  app.post("/api/runs", async (req, reply) => {
+    if (!requireAuth(req, reply)) return;
+    const input = parseManualRunRequest(req, reply);
+    if (!input) return;
+    const repo = getManualRunRepo(reply);
+    if (!repo) return;
+
+    let subject: NormalizedSubject | null;
+    try {
+      subject = await fetchGithubSubject(repo, input.number);
+    } catch (err) {
+      logger.error(
+        { err, repo: repo.full_name, number: input.number },
+        "manual run subject fetch failed",
+      );
+      return reply.code(500).send({ error: "github lookup failed" });
+    }
+    if (!subject) return reply.code(404).send({ error: "no such issue or pull request" });
+
+    if (input.type === "implement") {
+      return sendManualRunResult(
+        reply,
+        await startDraft(repo, subject, "api", null),
+      );
+    }
+
+    if (subject.type !== "pull_request") {
+      return reply.code(409).send({
+        error: `${input.type} requires an open pull request`,
+        status: "ignored",
+        reason: "not-pull-request",
+      });
+    }
+    if (subject.state !== "open") {
+      return reply.code(409).send({
+        error: `${input.type} requires an open pull request`,
+        status: "ignored",
+        reason: "subject-closed",
+      });
+    }
+
+    const result =
+      input.type === "review"
+        ? await startReview(repo, subject, "api")
+        : await maybeResolveConflict(repo, subject, "api");
+    return sendManualRunResult(reply, result);
+  });
 
   // Tasks where I'm assignee or my review is requested, with status.
   app.get("/api/tasks", async (req, reply) => {
@@ -640,22 +886,6 @@ export function registerApi(app: FastifyInstance): void {
     }
 
     return reply.code(409).send({ error: `cannot approve a ${task.kind} task` });
-  });
-
-  app.post("/api/tasks/:id/stop", async (req, reply) => {
-    if (!requireAuth(req, reply)) return;
-    const id = parseId(req, reply);
-    if (id === null) return;
-    const task = await getTask(id);
-    if (!task) return reply.code(404).send({ error: "no such task" });
-    if (TERMINAL_STATES.has(task.state))
-      return reply.code(409).send({ error: `task already ${task.state}` });
-    await setCancelFlag(id);
-    // pre-execution states have no container to kill — terminate directly.
-    if (task.state === "queued" || task.state === "draft" || task.state === "drafting")
-      await setTaskState(id, "cancelled", "stopped from the API");
-    logger.info({ taskId: id }, "stop requested from API");
-    return { ok: true };
   });
 
   // Dismiss a task (any kind) from the active list. Also signals cancel so a

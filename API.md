@@ -22,6 +22,7 @@ curl -H "Authorization: Bearer $API_TOKEN" \
 | Method & path | Returns / does |
 | --- | --- |
 | `GET /healthz` | `{ ok: true }` — unauthenticated liveness check |
+| `POST /api/runs` | manually enqueue an `implement`, `review`, or `resolve` run by GitHub issue/PR number. Body: `{ "type": "implement" \| "review" \| "resolve", "number": 123 }`. Returns `202` with `{ status: "enqueued", taskId }` |
 | `GET /api/tasks?scope=active\|all` | array of tasks where I'm assignee or reviewer. `active` (default) = non-terminal only; `all` = everything |
 | `GET /api/tasks/:id` | one task object |
 | `GET /api/tasks/:id/task` | the `TASK.md` brief (markdown). `404` if not generated yet |
@@ -34,8 +35,7 @@ curl -H "Authorization: Bearer $API_TOKEN" \
 | `PUT /api/tasks/:id/pr` | edit the proposed PR title/description before approving. Only allowed while `kind = implement` and `state = awaiting_approval`. Body: JSON `{ "title"?: "…", "body"?: "…" }` (send either or both) |
 | `GET /api/tasks/:id/prompt` | the exact prompt piped into Codex on the latest run (markdown). `404` until a run has started |
 | `GET /api/tasks/:id/log` | a bounded JSON page of the latest run's Codex transcript. Defaults to the newest 50 JSONL entries; `404` until a log exists |
-| `POST /api/tasks/:id/approve` | approve the proposal (see `proposes`). **Branch 3** (`kind = review`): submit an approving PR review using `REVIEW.md` as the body; if the trimmed review is empty, the approval has no body. **Branch 1** (`kind = implement`): merge the default branch into the pushed branch and open the proposed PR (returns `{ ok, prNumber, prUrl }`). `409` if the branch conflicts with the default branch (re-run to merge). Only valid from `state = awaiting_approval` → `awaiting_external` |
-| `POST /api/tasks/:id/stop` | cancel the task (signals the worker / kills the container). `409` if already terminal |
+| `POST /api/tasks/:id/approve` | approve the proposal (see `proposes`). **Branch 3** (`kind = review`): submit an approving PR review using `REVIEW.md` as the body; if the trimmed review is empty, the approval has no body. **Branch 1** (`kind = implement`): merge the default branch into the pushed branch and open the proposed PR (returns `{ ok, prNumber, prUrl }`), then mark it `awaiting_external`. `409` if the branch conflicts with the default branch (re-run to merge). Only valid from `state = awaiting_approval` |
 | `POST /api/tasks/:id/discard` | dismiss a task of any kind from the active list → `state = cancelled`, with `stateReason = "discarded from the API"`. Also signals cancel. `409` if already terminal |
 | `GET /api/containers` | live `docker ps` of the running codex runners |
 
@@ -58,6 +58,32 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" \
   --data-binary @TASK.md \
   "https://agent.example.com/api/tasks/21/task"
 ```
+
+## Manual runs
+
+`POST /api/runs` lets a client explicitly enqueue work by GitHub number, without
+requiring the issue to be assigned to you or the PR to request your review. The
+server still checks that the requested action applies:
+
+- `implement` accepts an open issue or open PR and creates the normal draft task.
+- `review` accepts only an open PR and creates or refreshes a review task.
+- `resolve` accepts only an open PR that is currently conflicting; mergeable PRs
+  return `409`.
+
+The request body accepts only `type` and `number`:
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{"type":"review","number":42}' \
+  "https://agent.example.com/api/runs"
+```
+
+Because the body contains no repository field, the endpoint requires exactly one
+enabled repo in `config/repos.yml`. With zero or multiple enabled repos it
+returns `409`. Missing GitHub numbers return `404`; closed subjects, plain
+issues for `review`/`resolve`, mergeable PRs for `resolve`, and active-task
+conflicts return `409` with the pipeline `reason`.
 
 ## Log pagination
 
@@ -129,7 +155,7 @@ curl -H "Authorization: Bearer $TOKEN" \
   "canApprove": false,             // POST …/approve is valid now (PR review approval or PR proposal)
   "canComment": false,             // POST …/comment is valid now (review tasks only)
   "proposes": null,                // what approve does: "review" | "pr" | null
-  "canStop": true                  // POST …/stop is valid now
+  "canDiscard": true               // POST …/discard is valid now
 }
 ```
 

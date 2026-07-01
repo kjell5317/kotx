@@ -158,20 +158,27 @@ The agent therefore acts as **me**. No GitHub App, no installation tokens.
 - **Polling** (`poll: true`): the app polls every `POLL_INTERVAL_SEC` for repos
   where I can't register a webhook. It diffs GitHub state against existing tasks
   to find new assignments, review requests, conflicts, and follow-up comments or
-  PR reviews — **no labels or commands**. Without a label to clear,
-  assignment/review triggers fire at most once per subject (`hasAnyTask` guard);
-  follow-ups arrive via cursors and `github_deliveries` de-dupe; conflict checks
-  self-limit (only fire when the PR is dirty and has no active task).
+  PR reviews — **no labels or commands**. Without a label to clear, the initial
+  assignment/review trigger fires at most once per subject (`hasAnyTask` guard);
+  a reviewed PR re-reviews when its head advances past the stored
+  `reviewed_head_sha` (poll-mode stand-in for `synchronize`) or when a new
+  comment/review lands on it; follow-ups arrive via cursors and
+  `github_deliveries` de-dupe; conflict checks self-limit (only fire when the PR
+  is dirty and has no active task).
 
 ### 5.3 Triggers (no labels, no commands)
 All labels (`agent:*`) and `/agent` commands were **removed** in v3. Triggers are
 the three role-aware workflows in §0, driven by webhook events:
 
 - `issues` assigned / `issue_comment` / `pull_request_review[_comment]` on a
-  subject I'm assigned to → Branch 1 (draft). My own comments are ignored (the
-  agent comments as me — this prevents a self-loop).
-- `pull_request` review_requested (me) / synchronize while my review is requested
-  → Branch 3.
+  subject I'm assigned to → Branch 1 (draft) — unless it's a PR I'm reviewing, in
+  which case it re-reviews (Branch 3). The agent's own comments are ignored via a
+  hidden marker (it comments as me — this prevents a self-loop).
+- `pull_request` review_requested (me) / synchronize → Branch 3. A PR I've
+  already reviewed also re-reviews on new commits or on a new comment/review
+  (`issue_comment` / `pull_request_review[_comment]`), keyed on an existing
+  review task rather than requested-reviewer membership (GitHub drops me from
+  requested reviewers once I've reviewed).
 - `pull_request` synchronize/open + `push` to the default branch, for PRs assigned
   to me → Branch 2 (only when `mergeable_state = dirty`).
 - `pull_request` opened/reopened from a pushed issue branch → record the PR and
@@ -417,11 +424,13 @@ uses the configured `container.network` and Codex has no Docker access.
 `/api/*` is gated by `Authorization: Bearer $API_TOKEN` (timing-safe compare;
 503 if `API_TOKEN` is unset). `CORS_ORIGIN` enables the browser frontend.
 Endpoints: `GET /api/tasks?scope=active|all`, `GET /api/tasks/:id`,
+`POST /api/runs` (manual `implement`/`review`/`resolve` by GitHub issue/PR
+number; requires exactly one enabled repo because the body has no repo field),
 `GET|PUT /api/tasks/:id/task`, `GET|PUT /api/tasks/:id/review`,
 `GET /api/tasks/:id/prompt` (the exact Codex prompt) and `…/log` (a JSON page
 of the latest run transcript, newest 200 JSONL entries by default; `limit`
 1..1000 and `before` byte cursor for older pages),
-`POST /api/tasks/:id/{start,approve,comment,stop,discard}`,
+`POST /api/tasks/:id/{start,approve,comment,discard}`,
 `GET /api/containers`. `discard` moves a task of any kind to `cancelled` with a
 discard reason. See [API.md](API.md) for the table.
 
@@ -433,7 +442,7 @@ discard reason. See [API.md](API.md) for the table.
 |------|----------|-----|
 | GitHub auth | private GitHub App + installation tokens | personal PAT (acts as me) |
 | Input | webhooks only | webhooks **and** per-repo polling |
-| HITL | stop + `HITL_REQUEST.json` + approve/reject + resume | **removed**; agent runs autonomously |
+| HITL | `HITL_REQUEST.json` + approve/reject + resume | **removed**; agent runs autonomously |
 | Output | open/update PR + structured review | push branch + plain summary comment; **no PR** |
 | Review mode | read-only review comment | **work on the PR's branch** + push |
 | Branch | `agent/issue-N` | GitHub-style `<n>-<slug>` (issues); PR head (PRs) |
@@ -442,7 +451,7 @@ discard reason. See [API.md](API.md) for the table.
 | CODEX_HOME | read-only shared mount | private writable per-run copy |
 | Runner image | Node only | Node + Python + uv; runs as root; pulls more at runtime |
 | Images | built on the VPS | CI → GHCR; compose pulls; auto-migrate |
-| Commands | run/review/stop/status/approve/reject | run/review/stop/status |
+| Commands | run/review/status/approve/reject | run/review/status |
 
 ## 14. Changelog v2 → v3
 

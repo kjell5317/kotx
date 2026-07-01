@@ -30,7 +30,7 @@ webhook events (or polling for repos without webhook rights).
 ## Layout
 
 ```text
-config/        operator-owned config (defaults.yml, repos.yml) — never read from target repos
+config/        operator-owned config (*.example.yml templates → copy to defaults.yml/repos.yml) — never read from target repos
 migrations/    Postgres schema (node-pg-migrate)
 packages/
   shared/      types, zod schemas, config, db, github, queue
@@ -48,6 +48,7 @@ All `/api/*` routes require `Authorization: Bearer $API_TOKEN`.
 
 | Method & path | Purpose |
 | --- | --- |
+| `POST /api/runs` | manually enqueue `implement`, `review`, or `resolve` for a GitHub issue/PR number |
 | `GET /api/tasks?scope=active\|all` | tasks where you're assignee or reviewer, with `status` (e.g. *awaiting approval*, *in review*) |
 | `GET /api/tasks/:id` | one task |
 | `GET /api/tasks/:id/task` | the `TASK.md` brief |
@@ -55,7 +56,7 @@ All `/api/*` routes require `Authorization: Bearer $API_TOKEN`.
 | `POST /api/tasks/:id/start` | start the implementation (Branch 1, draft → queued) |
 | `GET /api/tasks/:id/review` | the `REVIEW.md` |
 | `POST /api/tasks/:id/approve` | post `REVIEW.md` to the PR (Branch 3) |
-| `POST /api/tasks/:id/stop` | cancel a task |
+| `POST /api/tasks/:id/discard` | dismiss or cancel a non-terminal task |
 | `GET /api/containers` | live `docker ps` of the running codex runners |
 
 ## Setup
@@ -77,6 +78,8 @@ automation platform.
 ```bash
 cp .env.example .env
 # fill required values in .env
+cp config/repos.example.yml config/repos.yml
+cp config/defaults.example.yml config/defaults.yml
 # edit config/repos.yml to allowlist your repo and set assignee_login to your login
 
 npm install
@@ -126,10 +129,12 @@ docker compose up -d
 
 ## Configuration
 
-`config/repos.yml` is intentionally committed as a neutral sample because the
-app requires `config/repos.yml` at runtime. Replace the sample repo before
-running. A repo absent from this allowlist, or present with `enabled: false`, is
-ignored.
+The repo ships `config/repos.example.yml` and `config/defaults.example.yml` as
+templates; copy each to its non-`example` name (the app reads `config/repos.yml`
+and `config/defaults.yml` at runtime). The live files are gitignored so your
+allowlist and tuning never get committed. Set your allowlist + `assignee_login`
+in `config/repos.yml` before running — a repo absent from it, or present with
+`enabled: false`, is ignored.
 
 Required environment variables:
 
@@ -177,7 +182,8 @@ not a rebuild.
 
 ## Security Notes
 
-- Keep `.env` out of git. `.env.example` contains placeholders only.
+- Keep `.env` and the live `config/*.yml` out of git. Only the `.env.example` /
+  `config/*.example.yml` templates (placeholders only) are committed.
 - Use a fine-grained PAT scoped to the smallest set of allowlisted repositories.
   Rotate any token that was ever committed, pasted into an issue, or shared.
 - `GITHUB_WEBHOOK_SECRET`, `API_TOKEN`, `GHCR_TOKEN`, and `HA_TOKEN` are secrets.

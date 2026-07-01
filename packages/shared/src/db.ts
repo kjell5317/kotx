@@ -342,6 +342,40 @@ export async function hasReviewTask(
   return (res.rowCount ?? 0) > 0;
 }
 
+/** The most recent review task for a PR (with the SHA it last reviewed), if any. */
+export async function getLatestReviewTask(
+  repoFullName: string,
+  prNumber: number,
+): Promise<{ id: number; reviewed_head_sha: string | null } | undefined> {
+  const res = await getPool().query<{
+    id: string | number;
+    reviewed_head_sha: string | null;
+  }>(
+    `SELECT id, reviewed_head_sha FROM tasks
+     WHERE repo_full_name = $1
+       AND kind = 'review'
+       AND subject_type = 'pull_request'
+       AND subject_number = $2
+     ORDER BY created_at DESC, id DESC
+     LIMIT 1`,
+    [repoFullName, prNumber],
+  );
+  const row = res.rows[0];
+  if (!row) return undefined;
+  return { id: Number(row.id), reviewed_head_sha: row.reviewed_head_sha };
+}
+
+/** Record the PR head SHA a completed review run was performed against. */
+export async function setReviewedHeadSha(
+  id: number,
+  sha: string,
+): Promise<void> {
+  await getPool().query(`UPDATE tasks SET reviewed_head_sha = $2 WHERE id = $1`, [
+    id,
+    sha,
+  ]);
+}
+
 export async function findOpenPrTask(
   repoFullName: string,
   prNumber: number,
