@@ -780,7 +780,7 @@ export function registerApi(app: FastifyInstance): void {
 
   // Approve a proposal. Branch 3 (review) → post REVIEW.md as a comment.
   // Branch 1 (issue-origin implement) → bring the branch up to date with main
-  // and open the proposed PR. Both then wait on the external PR lifecycle.
+  // and open the proposed PR, then wait on the external PR lifecycle.
   app.post("/api/tasks/:id/approve", async (req, reply) => {
     if (!requireAuth(req, reply)) return;
     const id = parseId(req, reply);
@@ -794,7 +794,7 @@ export function registerApi(app: FastifyInstance): void {
       const review = await readTaskArtifact(id, "REVIEW.md");
       if (review === null) return reply.code(404).send({ error: "no REVIEW.md to post" });
       await postIssueComment(getOctokit(), task.repo_full_name, task.subject_number, review);
-      await setTaskState(id, "awaiting_external");
+      await setTaskState(id, "done");
       logger.info({ taskId: id }, "review approved and posted");
       return { ok: true };
     }

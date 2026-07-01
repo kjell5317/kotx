@@ -18,10 +18,11 @@ See [SPEC.md](SPEC.md) for the full design and the decisions behind it.
    follow-up drafts revise the reviewed `TASK.md` from the prior run using the
    latest triggering comment or review as the new input.
 2. **Conflict** — a PR assigned to you becomes unmergeable. Codex resolves the
-   conflicts automatically (no approval) and pushes the merge.
+   conflicts automatically (no approval), pushes the merge, and marks that
+   conflict task done.
 3. **Review** — your review is requested on a PR (or such a PR gets new commits).
    Codex does a **read-only** review and writes `REVIEW.md`. You approve it in the
-   frontend; only then is it posted as a PR comment.
+   frontend; only then is it posted as a PR comment and marked done.
 
 There are **no labels and no `/agent` commands** — triggers are plain GitHub
 webhook events (or polling for repos without webhook rights).
