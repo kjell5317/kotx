@@ -4,6 +4,7 @@ import { join } from "node:path";
 import cors from "@fastify/cors";
 import {
   addRun,
+  approvePullRequestReview,
   displayStatus,
   enqueueTask,
   getEnabledRepo,
@@ -94,10 +95,12 @@ function taskDto(t: TaskListItem) {
     updatedAt: t.updated_at,
     githubUrl: githubUrl(t.repo_full_name, t.subject_type, t.subject_number),
     canStart: t.kind === "implement" && t.state === "draft",
-    // review → post REVIEW.md; implement (issue-origin) → open the proposed PR.
+    // review → submit an approving PR review; implement (issue-origin) → open the proposed PR.
     canApprove:
       t.state === "awaiting_approval" &&
       (t.kind === "review" || t.kind === "implement"),
+    // review tasks can also post REVIEW.md as a plain PR comment instead.
+    canComment: t.kind === "review" && t.state === "awaiting_approval",
     // what approving this task does, so the UI can label the button/proposal.
     proposes:
       t.state === "awaiting_approval"
@@ -133,6 +136,28 @@ async function readLatestRunArtifact(
   const run = await getLatestRun(taskId);
   if (!run) return null;
   return readFileOrNull(join(runDirFor(loadEnv().agentDataDir, run.id), name));
+}
+
+async function requirePendingReview(
+  id: number,
+  reply: FastifyReply,
+  existingTask?: Task,
+): Promise<{ task: Task; review: string } | null> {
+  const task = existingTask ?? (await getTask(id));
+  if (!task) {
+    reply.code(404).send({ error: "no such task" });
+    return null;
+  }
+  if (task.kind !== "review" || task.state !== "awaiting_approval") {
+    reply.code(409).send({ error: `cannot finalize review in state ${task.state}` });
+    return null;
+  }
+  const review = await readTaskArtifact(id, "REVIEW.md");
+  if (review === null) {
+    reply.code(404).send({ error: "no REVIEW.md" });
+    return null;
+  }
+  return { task, review };
 }
 
 const DEFAULT_LOG_LIMIT = 50;
@@ -686,7 +711,7 @@ export function registerApi(app: FastifyInstance): void {
     if (!task) return reply.code(404).send({ error: "no such task" });
     if (task.kind !== "review" || task.state !== "awaiting_approval")
       return reply.code(409).send({ error: `cannot edit review in state ${task.state}` });
-    const body = bodyText(req);
+    const body = bodyText(req, { allowEmpty: true });
     if (body === null) return reply.code(400).send({ error: "empty body" });
     const dir = taskDirFor(loadEnv().agentDataDir, id);
     await mkdir(dir, { recursive: true });
@@ -778,7 +803,27 @@ export function registerApi(app: FastifyInstance): void {
     return { ok: true };
   });
 
-  // Approve a proposal. Branch 3 (review) → post REVIEW.md as a comment.
+  // Branch 3: post REVIEW.md as a plain PR comment instead of submitting a review.
+  app.post("/api/tasks/:id/comment", async (req, reply) => {
+    if (!requireAuth(req, reply)) return;
+    const id = parseId(req, reply);
+    if (id === null) return;
+    const pending = await requirePendingReview(id, reply);
+    if (!pending) return;
+    if (pending.review.trim() === "")
+      return reply.code(400).send({ error: "REVIEW.md cannot be empty when posting a comment" });
+    await postIssueComment(
+      getOctokit(),
+      pending.task.repo_full_name,
+      pending.task.subject_number,
+      pending.review,
+    );
+    await setTaskState(id, "awaiting_external");
+    logger.info({ taskId: id }, "review posted as comment");
+    return { ok: true };
+  });
+
+  // Approve a proposal. Branch 3 (review) → submit an approving PR review.
   // Branch 1 (issue-origin implement) → bring the branch up to date with main
   // and open the proposed PR, then wait on the external PR lifecycle.
   app.post("/api/tasks/:id/approve", async (req, reply) => {
@@ -791,11 +836,16 @@ export function registerApi(app: FastifyInstance): void {
       return reply.code(409).send({ error: `cannot approve task in state ${task.state}` });
 
     if (task.kind === "review") {
-      const review = await readTaskArtifact(id, "REVIEW.md");
-      if (review === null) return reply.code(404).send({ error: "no REVIEW.md to post" });
-      await postIssueComment(getOctokit(), task.repo_full_name, task.subject_number, review);
-      await setTaskState(id, "done");
-      logger.info({ taskId: id }, "review approved and posted");
+      const pending = await requirePendingReview(id, reply, task);
+      if (!pending) return;
+      await approvePullRequestReview(
+        getOctokit(),
+        pending.task.repo_full_name,
+        pending.task.subject_number,
+        pending.review,
+      );
+      await setTaskState(id, "awaiting_external");
+      logger.info({ taskId: id }, "PR review approved");
       return { ok: true };
     }
 
@@ -892,12 +942,15 @@ function parseId(req: FastifyRequest, reply: FastifyReply): number | null {
 }
 
 /**
- * Extract a non-empty markdown body from a PUT. Accepts:
+ * Extract a markdown body from a PUT. Accepts:
  *  - text/markdown or text/plain → a raw string;
  *  - application/json → a raw Buffer (the global HMAC parser), holding either a
  *    JSON string, a `{ "content": "…" }` object, or just raw markdown.
  */
-function bodyText(req: FastifyRequest): string | null {
+function bodyText(
+  req: FastifyRequest,
+  opts: { allowEmpty?: boolean } = {},
+): string | null {
   const b = req.body;
   let text: string | undefined;
   if (typeof b === "string") {
@@ -913,7 +966,9 @@ function bodyText(req: FastifyRequest): string | null {
   } else if (b && typeof b === "object") {
     text = (b as { content?: string }).content;
   }
-  return typeof text === "string" && text.trim() !== "" ? text : null;
+  return typeof text === "string" && (opts.allowEmpty || text.trim() !== "")
+    ? text
+    : null;
 }
 
 /**

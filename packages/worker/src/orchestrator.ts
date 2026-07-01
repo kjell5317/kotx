@@ -302,7 +302,7 @@ async function runResolveConflict(ctx: RunCtx, merge: MergeResult): Promise<void
   });
 }
 
-/** Branch 3: read-only review → REVIEW.md, then await my approval to post it. */
+/** Branch 3: read-only review → REVIEW.md, then await my approval to submit it. */
 async function runReview(ctx: RunCtx): Promise<void> {
   const guarded = await runPrompt(ctx, "review", {});
   const reviewMd = await readArtifact(ctx.worktreePath, "REVIEW.md");
@@ -317,7 +317,7 @@ async function runReview(ctx: RunCtx): Promise<void> {
     exitCode: guarded.exitCode,
     resultMd: reviewMd,
   });
-  if (outcome === "completed" && reviewMd) {
+  if (outcome === "completed" && reviewMd !== null) {
     await mkdir(ctx.taskDir, { recursive: true });
     await writeFile(join(ctx.taskDir, "REVIEW.md"), reviewMd, "utf8");
     // Record the reviewed PR head so poll mode can detect later commits and

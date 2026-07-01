@@ -28,8 +28,10 @@ Triggers are plain GitHub events (or polling) keyed to your role on the subject
    implement/PR task tracks review and merge progress.
 3. **Review (Branch 3)** — your review is requested on a PR, or such a PR gets new
    commits. A read-only review run writes `REVIEW.md`; the task waits in
-   `awaiting_approval`. `POST …/approve` posts it as a PR comment, then the task
-   is `done`.
+   `awaiting_approval`. `POST …/approve` submits an approving PR review using
+   `REVIEW.md` as the body (or no body when the trimmed review is empty);
+   `POST …/comment` posts non-empty `REVIEW.md` as a plain PR comment. Either
+   action moves the task to waiting for that PR to merge or close.
 
 Opened/reopened PRs from pushed issue branches are recorded on the task. A
 merged/closed PR closes its tracked open tasks (`done`/`cancelled`).
@@ -220,9 +222,12 @@ draft refresh, the execute run, and human edits.
   resolves them, commit the merge + push → `done`. If the branch was already
   clean but the merge advanced it, the clean merge is pushed and the task is also
   `done`. Conflict-marker safety net before commit.
-- **review** (read-only): write `/workspace/REVIEW.md` as a ready-to-post PR
-  comment; saved to the task dir; state → `awaiting_approval`. Never commits.
-  `POST …/approve` posts it verbatim → `done`.
+- **review** (read-only): write `/workspace/REVIEW.md` as a ready-to-submit PR
+  review body; saved to the task dir; state → `awaiting_approval`. Never commits.
+  `POST …/approve` submits an approving PR review with that body (omitted when
+  empty), while `POST …/comment` posts non-empty review text as a plain PR
+  comment. Either action moves the task to `awaiting_external` ("in review")
+  until the PR merges or closes.
 
 Read-only is structural: git creds never enter the container (SPEC §12), and the
 worker simply doesn't commit/push for draft/review. Fork PRs can't be pushed to,
@@ -255,7 +260,7 @@ reused):
 ```text
 Branch 1: drafting → draft → (start) → queued → running → awaiting_external(waiting on PR) → awaiting_external(in review) → done
 Branch 2:                                queued → running → done
-Branch 3:                                queued → running → awaiting_approval → (approve) → done
+Branch 3:                                queued → running → awaiting_approval → (approve/comment) → awaiting_external(in review) → done
 any:                                     … → failed | cancelled
 ```
 
@@ -425,7 +430,7 @@ number; requires exactly one enabled repo because the body has no repo field),
 `GET /api/tasks/:id/prompt` (the exact Codex prompt) and `…/log` (a JSON page
 of the latest run transcript, newest 200 JSONL entries by default; `limit`
 1..1000 and `before` byte cursor for older pages),
-`POST /api/tasks/:id/{start,approve,discard}`,
+`POST /api/tasks/:id/{start,approve,comment,discard}`,
 `GET /api/containers`. `discard` moves a task of any kind to `cancelled` with a
 discard reason. See [API.md](API.md) for the table.
 
@@ -457,7 +462,7 @@ discard reason. See [API.md](API.md) for the table.
 | Task vs run | trigger → run immediately | Branch 1 produces a reviewable `TASK.md`; I `start` it from the frontend |
 | Kinds | implement / review (review wrote to the PR) | implement (draft+execute) / resolve_conflict / review (**read-only**) |
 | Conflicts | left for the agent mid-implement | dedicated auto Branch 2 (resolve + push, no approval) |
-| Review | wrote to the PR branch | read-only → `REVIEW.md`, posted to the PR on my approval |
+| Review | wrote to the PR branch | read-only → `REVIEW.md`, submitted as an approval or posted as a comment |
 | States | queued/running/done/… | + `drafting`, `draft`, `awaiting_approval`, `awaiting_external`; `role` column |
 | Codex stdin | `TASK.md` | `PROMPT.md` (TASK.md/REVIEW.md are per-task artifacts) |
 | Polling | polled labels + commands | diffs GitHub state for assignments/reviews/conflicts/comments |
