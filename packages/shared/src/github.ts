@@ -1,5 +1,6 @@
 import { Octokit } from "@octokit/rest";
 import { loadEnv } from "./config.js";
+import { logger } from "./logger.js";
 
 let octokit: Octokit | undefined;
 
@@ -83,7 +84,13 @@ export async function approvePullRequestReview(
 export async function openPullRequest(
   octokit: Octokit,
   repoFullName: string,
-  opts: { title: string; body: string; head: string; base: string },
+  opts: {
+    title: string;
+    body: string;
+    head: string;
+    base: string;
+    assignees?: string[];
+  },
 ): Promise<{ number: number; htmlUrl: string }> {
   const [owner, repo] = splitRepo(repoFullName);
   const res = await octokit.pulls.create({
@@ -94,7 +101,26 @@ export async function openPullRequest(
     head: opts.head,
     base: opts.base,
   });
-  return { number: res.data.number, htmlUrl: res.data.html_url };
+  const number = res.data.number;
+  // Assignees can't be set via pulls.create; a PR is an issue, so assign through
+  // the issues API. Best-effort — the PR already exists, so a failed assignment
+  // (e.g. the login isn't a collaborator) must not fail the whole open.
+  if (opts.assignees?.length) {
+    try {
+      await octokit.issues.addAssignees({
+        owner,
+        repo,
+        issue_number: number,
+        assignees: opts.assignees,
+      });
+    } catch (err) {
+      logger.warn(
+        { err, repoFullName, prNumber: number, assignees: opts.assignees },
+        "failed to assign PR",
+      );
+    }
+  }
+  return { number, htmlUrl: res.data.html_url };
 }
 
 /**

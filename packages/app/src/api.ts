@@ -903,6 +903,8 @@ export function registerApi(app: FastifyInstance): void {
         body,
         head: task.branch_name,
         base: repo.default_branch,
+        // Assign the PR to me (the repo login) so it lands in my assigned list.
+        assignees: [repo.assignee_login],
       });
       await setTaskPrAndState(id, pr.number, "awaiting_external");
       logger.info({ taskId: id, prNumber: pr.number }, "PR proposal approved and opened");
