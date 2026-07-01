@@ -34,6 +34,11 @@ export interface TaskContext {
   isFollowUp?: boolean;
   // implement only: the approved TASK.md brief, embedded as the instructions.
   taskBrief?: string;
+  // implement (issue-origin execute) only: the agent must also propose a PR
+  // (PR_TITLE.md / PR_BODY.md) because no PR exists yet for this work.
+  opensPr?: boolean;
+  // the repo's PR template, if any, to shape the proposed PR description.
+  prTemplate?: string;
   // true when the per-run dev-container (DinD) sidecar is enabled.
   dockerAvailable?: boolean;
 }

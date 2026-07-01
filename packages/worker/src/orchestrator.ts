@@ -50,6 +50,7 @@ import {
   deleteArtifacts,
   readArtifact,
   readArtifacts,
+  readPrTemplate,
 } from "./outputs.js";
 import { containerName, killContainer, runCodexContainer } from "./runner.js";
 import { renderPrompt, type PromptKind, type TaskContext } from "./templates.js";
@@ -234,13 +235,20 @@ async function runImplement(ctx: RunCtx, merge: MergeResult): Promise<void> {
   const brief =
     (await readArtifact(ctx.taskDir, "TASK.md")) ??
     `${ctx.subject.title}\n\n${ctx.subject.body}`;
+  // Issue-origin work has no PR yet: the agent proposes one for human approval.
+  const opensPr = ctx.task.subject_type === "issue";
   const guarded = await runPrompt(ctx, "implement", {
     taskBrief: brief,
     mergeConflicts: merge.conflicted ? merge.files : undefined,
+    opensPr,
+    prTemplate: opensPr
+      ? ((await readPrTemplate(ctx.worktreePath)) ?? undefined)
+      : undefined,
   });
   await finalizeWrite(ctx, guarded, merge, {
     forceWithLease: ctx.task.subject_type === "issue",
     successState: "awaiting_external",
+    proposePr: opensPr,
   });
 }
 
@@ -302,7 +310,13 @@ async function finalizeWrite(
   ctx: RunCtx,
   guarded: Guarded,
   merge: MergeResult,
-  opts: { forceWithLease: boolean; successState: TaskState },
+  opts: {
+    forceWithLease: boolean;
+    successState: TaskState;
+    // issue-origin implement: store the proposed PR and await approval instead
+    // of posting a summary and going straight to awaiting_external.
+    proposePr?: boolean;
+  },
 ): Promise<void> {
   const artifacts = await readArtifacts(ctx.worktreePath);
   const outcome = classifyOutcome({
@@ -350,6 +364,21 @@ async function finalizeWrite(
     await pushBranch(ctx.repoFullName, ctx.branch, gitToken(), {
       forceWithLease: opts.forceWithLease,
     });
+  }
+
+  if (opts.proposePr) {
+    // The pushed branch has no PR yet. Store the proposed title/description for
+    // human approval (the PR body carries the writeup, so we don't comment on the
+    // issue here). Fall back to the subject title / run summary if the agent
+    // didn't emit them, so approval is never blocked.
+    const title = (artifacts.prTitle?.trim() || ctx.subject.title).trim();
+    const body = artifacts.prBody?.trim() || artifacts.resultMd || "Done.";
+    await mkdir(ctx.taskDir, { recursive: true });
+    await writeFile(join(ctx.taskDir, "PR_TITLE.md"), title, "utf8");
+    await writeFile(join(ctx.taskDir, "PR_BODY.md"), body, "utf8");
+    await setTaskState(ctx.task.id, "awaiting_approval");
+    await removeWorktree(ctx.repoFullName, ctx.worktreePath);
+    return;
   }
 
   const summary = artifacts.resultMd ?? "Done.";

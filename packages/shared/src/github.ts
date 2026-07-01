@@ -59,3 +59,43 @@ export async function postIssueComment(
   });
   return res.data.id;
 }
+
+/** Open a pull request. Returns the new PR's number and html url. */
+export async function openPullRequest(
+  octokit: Octokit,
+  repoFullName: string,
+  opts: { title: string; body: string; head: string; base: string },
+): Promise<{ number: number; htmlUrl: string }> {
+  const [owner, repo] = splitRepo(repoFullName);
+  const res = await octokit.pulls.create({
+    owner,
+    repo,
+    title: opts.title,
+    body: opts.body,
+    head: opts.head,
+    base: opts.base,
+  });
+  return { number: res.data.number, htmlUrl: res.data.html_url };
+}
+
+/**
+ * Bring `branch` up to date by merging `base` (e.g. the default branch) into it,
+ * server-side. "up_to_date" means nothing to merge; "conflict" means the merge
+ * couldn't be performed automatically (needs a fresh run to resolve).
+ */
+export async function updateBranchFromBase(
+  octokit: Octokit,
+  repoFullName: string,
+  branch: string,
+  base: string,
+): Promise<"updated" | "up_to_date" | "conflict"> {
+  const [owner, repo] = splitRepo(repoFullName);
+  try {
+    const res = await octokit.repos.merge({ owner, repo, base: branch, head: base });
+    // 201 = merge commit created; 204 = already up to date (nothing to merge)
+    return res.status === 201 ? "updated" : "up_to_date";
+  } catch (err) {
+    if ((err as { status?: number }).status === 409) return "conflict";
+    throw err;
+  }
+}

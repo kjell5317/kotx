@@ -29,9 +29,11 @@ curl -H "Authorization: Bearer $API_TOKEN" \
 | `POST /api/tasks/:id/start` | **Branch 1**: start the implementation. Only valid from `state = draft` → `queued` |
 | `GET /api/tasks/:id/review` | the `REVIEW.md` (markdown). `404` if not generated yet |
 | `PUT /api/tasks/:id/review` | edit the review before approving. Only allowed while `state = awaiting_approval`. Body: raw markdown, or JSON `{ "content": "…" }` |
+| `GET /api/tasks/:id/pr` | **Branch 1**: the proposed PR as JSON `{ title, body }`. `404` if there's no proposal |
+| `PUT /api/tasks/:id/pr` | edit the proposed PR title/description before approving. Only allowed while `kind = implement` and `state = awaiting_approval`. Body: JSON `{ "title"?: "…", "body"?: "…" }` (send either or both) |
 | `GET /api/tasks/:id/prompt` | the exact prompt piped into Codex on the latest run (markdown). `404` until a run has started |
-| `GET /api/tasks/:id/log` | a bounded JSON page of the latest run's Codex transcript. Defaults to the newest 200 JSONL entries; `404` until a log exists |
-| `POST /api/tasks/:id/approve` | **Branch 3**: post `REVIEW.md` as a PR comment. Only valid from `state = awaiting_approval` → `awaiting_external` (`status = in review`) |
+| `GET /api/tasks/:id/log` | a bounded JSON page of the latest run's Codex transcript. Defaults to the newest 50 JSONL entries; `404` until a log exists |
+| `POST /api/tasks/:id/approve` | approve the proposal (see `proposes`). **Branch 3** (`kind = review`): post `REVIEW.md` as a PR comment. **Branch 1** (`kind = implement`): merge the default branch into the pushed branch and open the proposed PR (returns `{ ok, prNumber, prUrl }`). `409` if the branch conflicts with the default branch (re-run to merge). Only valid from `state = awaiting_approval` → `awaiting_external` |
 | `POST /api/tasks/:id/stop` | cancel the task (signals the worker / kills the container). `409` if already terminal |
 | `POST /api/tasks/:id/discard` | dismiss a task of any kind from the active list → `state = cancelled`, with `stateReason = "discarded from the API"`. Also signals cancel. `409` if already terminal |
 | `GET /api/containers` | live `docker ps` of the running codex runners |
@@ -39,10 +41,11 @@ curl -H "Authorization: Bearer $API_TOKEN" \
 Mutating endpoints return `{ ok: true }` on success. Errors return
 `{ "error": "…" }` with a `4xx`/`503` status (`409` = wrong state for the action).
 
-The two `PUT` endpoints take the new content as the **request body**. Send it as
-`Content-Type: text/markdown` (or `text/plain`) with the raw markdown, or as
-`application/json` with `{ "content": "…" }`. A `PUT` with no recognized
-content type is rejected by the server with `415 Unsupported Media Type`.
+The `…/task` and `…/review` `PUT` endpoints take the new content as the **request
+body**. Send it as `Content-Type: text/markdown` (or `text/plain`) with the raw
+markdown, or as `application/json` with `{ "content": "…" }`. A `PUT` with no
+recognized content type is rejected by the server with `415 Unsupported Media Type`.
+The `…/pr` `PUT` differs: it takes `application/json` with `{ "title"?, "body"? }`.
 
 ```bash
 # raw markdown
@@ -56,13 +59,13 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" \
 
 `GET /api/tasks/:id/log` reads `codex.jsonl` from the task's latest run and
 returns a JSON object instead of the raw NDJSON file. By default it returns the
-newest 200 complete JSONL lines without loading the full log into memory.
+newest 50 complete JSONL lines without loading the full log into memory.
 
 Query parameters:
 
 | Parameter | Meaning |
 | --- | --- |
-| `limit` | Number of JSONL lines to return. Default `200`, maximum `1000`. Values outside `1..1000` return `400`. |
+| `limit` | Number of JSONL lines to return. Default `50`, maximum `1000`. Values outside `1..1000` return `400`. |
 | `before` | Optional byte cursor. Return the newest `limit` lines ending before this offset. Use `page.nextBefore` from the previous response to page older. Must be a non-negative integer, cannot exceed the current log size, and must point to a line boundary unless it equals the end of the file. |
 
 Response shape:
@@ -119,12 +122,16 @@ curl -H "Authorization: Bearer $TOKEN" \
   "updatedAt": "2026-06-30T10:00:05.000Z",
   "githubUrl": "https://github.com/owner/repo/issues/31",
   "canStart": true,                // POST …/start is valid now
-  "canApprove": false,             // POST …/approve is valid now
+  "canApprove": false,             // POST …/approve is valid now (review or PR proposal)
+  "proposes": null,                // what approve does: "review" | "pr" | null
   "canStop": true                  // POST …/stop is valid now
 }
 ```
 
 Use `status` for display and the `can*` flags to decide which buttons to show.
+When `canApprove` is true, `proposes` says what the approve button does: `"review"`
+posts `REVIEW.md` (fetch via `GET …/review`), `"pr"` opens the proposed PR (fetch via
+`GET …/pr`).
 
 ### Status meanings
 
@@ -155,8 +162,10 @@ Use `status` for display and the `can*` flags to decide which buttons to show.
 
 - **Branch 1 (task)**: poll `GET /api/tasks` → open one with `canStart` →
   `GET …/task` (optionally `PUT …/task` to tweak) → `POST …/start` → it moves to
-  `running`, then `waiting on PR`, then `in review` after a PR is opened from the
-  pushed branch, then `done` when that PR merges.
+  `running`, then comes back with `canApprove` and `proposes = "pr"`. Review the
+  proposed PR via `GET …/pr` (optionally `PUT …/pr` to edit the title/body) →
+  `POST …/approve` to open the PR. It then shows `in review` until that PR merges
+  (`done`) or closes (`cancelled`).
 - **Branch 3 (review)**: a task appears with `kind=review`, `canApprove` →
   `GET …/review` → `POST …/approve` to post it to the PR, then it stays `in
   review` until the PR merges or closes.

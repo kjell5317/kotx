@@ -6,18 +6,22 @@ import {
   addRun,
   displayStatus,
   enqueueTask,
+  getEnabledRepo,
   getLatestRun,
   getOctokit,
   getTask,
   listTasks,
   loadEnv,
   logger,
+  openPullRequest,
   postIssueComment,
   runDirFor,
   setCancelFlag,
+  setTaskPrAndState,
   setTaskState,
   taskDirFor,
   TERMINAL_STATES,
+  updateBranchFromBase,
   type Task,
   type TaskListItem,
 } from "@kotx/shared";
@@ -80,7 +84,19 @@ function taskDto(t: TaskListItem) {
     updatedAt: t.updated_at,
     githubUrl: githubUrl(t.repo_full_name, t.subject_type, t.subject_number),
     canStart: t.kind === "implement" && t.state === "draft",
-    canApprove: t.kind === "review" && t.state === "awaiting_approval",
+    // review → post REVIEW.md; implement (issue-origin) → open the proposed PR.
+    canApprove:
+      t.state === "awaiting_approval" &&
+      (t.kind === "review" || t.kind === "implement"),
+    // what approving this task does, so the UI can label the button/proposal.
+    proposes:
+      t.state === "awaiting_approval"
+        ? t.kind === "review"
+          ? "review"
+          : t.kind === "implement"
+            ? "pr"
+            : null
+        : null,
     canStop: t.state === "queued" || t.state === "running" || t.state === "drafting",
     // any non-terminal task can be dismissed (e.g. one stuck "in review")
     canDiscard: !TERMINAL_STATES.has(t.state),
@@ -110,7 +126,7 @@ async function readLatestRunArtifact(
   return readFileOrNull(join(runDirFor(loadEnv().agentDataDir, run.id), name));
 }
 
-const DEFAULT_LOG_LIMIT = 200;
+const DEFAULT_LOG_LIMIT = 50;
 const MAX_LOG_LIMIT = 1000;
 const LOG_READ_CHUNK_BYTES = 64 * 1024;
 
@@ -432,6 +448,45 @@ export function registerApi(app: FastifyInstance): void {
     return { ok: true };
   });
 
+  // Branch 1 (issue-origin): the proposed PR title + description, awaiting approval.
+  app.get("/api/tasks/:id/pr", async (req, reply) => {
+    if (!requireAuth(req, reply)) return;
+    const id = parseId(req, reply);
+    if (id === null) return;
+    const [title, body] = await Promise.all([
+      readTaskArtifact(id, "PR_TITLE.md"),
+      readTaskArtifact(id, "PR_BODY.md"),
+    ]);
+    if (title === null && body === null)
+      return reply.code(404).send({ error: "no PR proposal" });
+    return { title: title?.trim() ?? null, body };
+  });
+
+  // Edit the proposed PR title/description before approving/opening it.
+  app.put("/api/tasks/:id/pr", async (req, reply) => {
+    if (!requireAuth(req, reply)) return;
+    const id = parseId(req, reply);
+    if (id === null) return;
+    const task = await getTask(id);
+    if (!task) return reply.code(404).send({ error: "no such task" });
+    if (task.kind !== "implement" || task.state !== "awaiting_approval")
+      return reply.code(409).send({ error: `cannot edit PR proposal in state ${task.state}` });
+    const proposal = parsePrProposal(req);
+    if (!proposal || (proposal.title === undefined && proposal.body === undefined))
+      return reply.code(400).send({ error: "provide title and/or body" });
+    if (proposal.title !== undefined && proposal.title.trim() === "")
+      return reply.code(400).send({ error: "title cannot be empty" });
+    if (proposal.body !== undefined && proposal.body.trim() === "")
+      return reply.code(400).send({ error: "body cannot be empty" });
+    const dir = taskDirFor(loadEnv().agentDataDir, id);
+    await mkdir(dir, { recursive: true });
+    if (proposal.title !== undefined)
+      await writeFile(join(dir, "PR_TITLE.md"), proposal.title.trim(), "utf8");
+    if (proposal.body !== undefined)
+      await writeFile(join(dir, "PR_BODY.md"), proposal.body, "utf8");
+    return { ok: true };
+  });
+
   // The exact prompt piped into Codex on the latest run (for inspection/debug).
   app.get("/api/tasks/:id/prompt", async (req, reply) => {
     if (!requireAuth(req, reply)) return;
@@ -477,22 +532,64 @@ export function registerApi(app: FastifyInstance): void {
     return { ok: true };
   });
 
-  // Branch 3: approve the review → post REVIEW.md to the PR, then wait for the
-  // PR lifecycle to finish.
+  // Approve a proposal. Branch 3 (review) → post REVIEW.md as a comment.
+  // Branch 1 (issue-origin implement) → bring the branch up to date with main
+  // and open the proposed PR. Both then wait on the external PR lifecycle.
   app.post("/api/tasks/:id/approve", async (req, reply) => {
     if (!requireAuth(req, reply)) return;
     const id = parseId(req, reply);
     if (id === null) return;
     const task = await getTask(id);
     if (!task) return reply.code(404).send({ error: "no such task" });
-    if (task.kind !== "review" || task.state !== "awaiting_approval")
+    if (task.state !== "awaiting_approval")
       return reply.code(409).send({ error: `cannot approve task in state ${task.state}` });
-    const review = await readTaskArtifact(id, "REVIEW.md");
-    if (review === null) return reply.code(404).send({ error: "no REVIEW.md to post" });
-    await postIssueComment(getOctokit(), task.repo_full_name, task.subject_number, review);
-    await setTaskState(id, "awaiting_external");
-    logger.info({ taskId: id }, "review approved and posted");
-    return { ok: true };
+
+    if (task.kind === "review") {
+      const review = await readTaskArtifact(id, "REVIEW.md");
+      if (review === null) return reply.code(404).send({ error: "no REVIEW.md to post" });
+      await postIssueComment(getOctokit(), task.repo_full_name, task.subject_number, review);
+      await setTaskState(id, "awaiting_external");
+      logger.info({ taskId: id }, "review approved and posted");
+      return { ok: true };
+    }
+
+    if (task.kind === "implement" && task.pr_number === null) {
+      if (!task.branch_name)
+        return reply.code(409).send({ error: "task has no pushed branch" });
+      const repo = getEnabledRepo(task.repo_full_name);
+      if (!repo) return reply.code(409).send({ error: "repository is not enabled" });
+      const title = (await readTaskArtifact(id, "PR_TITLE.md"))?.trim();
+      const body = await readTaskArtifact(id, "PR_BODY.md");
+      if (!title || body === null)
+        return reply.code(404).send({ error: "no PR proposal to open" });
+
+      const octokit = getOctokit();
+      // Auto-rebase: merge the default branch into the feature branch first.
+      const merged = await updateBranchFromBase(
+        octokit,
+        task.repo_full_name,
+        task.branch_name,
+        repo.default_branch,
+      );
+      if (merged === "conflict") {
+        const reason =
+          "branch conflicts with the default branch — re-run the task to merge it";
+        await setTaskState(id, "awaiting_approval", reason);
+        return reply.code(409).send({ error: reason });
+      }
+
+      const pr = await openPullRequest(octokit, task.repo_full_name, {
+        title,
+        body,
+        head: task.branch_name,
+        base: repo.default_branch,
+      });
+      await setTaskPrAndState(id, pr.number, "awaiting_external");
+      logger.info({ taskId: id, prNumber: pr.number }, "PR proposal approved and opened");
+      return { ok: true, prNumber: pr.number, prUrl: pr.htmlUrl };
+    }
+
+    return reply.code(409).send({ error: `cannot approve a ${task.kind} task` });
   });
 
   app.post("/api/tasks/:id/stop", async (req, reply) => {
@@ -587,6 +684,39 @@ function bodyText(req: FastifyRequest): string | null {
     text = (b as { content?: string }).content;
   }
   return typeof text === "string" && text.trim() !== "" ? text : null;
+}
+
+/**
+ * Parse a `{ title?, body? }` JSON payload for editing a PR proposal. Accepts a
+ * raw Buffer (the global HMAC json parser), a JSON string, or an already-parsed
+ * object. Returns null if it isn't a JSON object.
+ */
+function parsePrProposal(
+  req: FastifyRequest,
+): { title?: string; body?: string } | null {
+  const b = req.body;
+  let obj: unknown;
+  if (Buffer.isBuffer(b)) {
+    try {
+      obj = JSON.parse(b.toString("utf8"));
+    } catch {
+      return null;
+    }
+  } else if (typeof b === "string") {
+    try {
+      obj = JSON.parse(b);
+    } catch {
+      return null;
+    }
+  } else {
+    obj = b;
+  }
+  if (!obj || typeof obj !== "object") return null;
+  const { title, body } = obj as { title?: unknown; body?: unknown };
+  return {
+    ...(typeof title === "string" ? { title } : {}),
+    ...(typeof body === "string" ? { body } : {}),
+  };
 }
 
 async function enqueueRun(

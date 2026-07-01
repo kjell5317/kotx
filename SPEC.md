@@ -16,8 +16,11 @@ Triggers are plain GitHub events (or polling) keyed to your role on the subject
    issue/PR you're assigned to. A read-only **draft** Codex run produces
    `TASK.md` (brief + plan) and the task waits in `draft` ("waiting on my
    approval"). You review/edit it via the API and `POST …/start`; the **execute**
-   run then implements, pushes the branch, and comments. Issue work waits for a
-   manually opened PR from that branch, then waits for the PR to merge.
+   run then implements and pushes the branch. For issue work it also proposes a
+   PR (title + description following the repo's PR template and `CONTRIBUTING.md`)
+   and waits in `awaiting_approval`; you review/edit the proposal (`GET/PUT …/pr`)
+   and `POST …/approve`, which merges the default branch into the pushed branch
+   and opens the PR. The task then waits for that PR to merge or close.
 2. **Conflict (Branch 2)** — a PR assigned to you is unmergeable (`mergeable_state
    = dirty`), detected on `pull_request` synchronize/open or a `push` to the
    default branch. Codex resolves the in-progress merge automatically (no
@@ -100,8 +103,9 @@ Ordered roughly by priority:
 
 A private coding agent that reacts to GitHub issues/PRs assigned to me, runs
 Codex in isolated Docker containers on an operator-owned Docker host, and **pushes branches +
-posts plain summaries as me**. It never opens PRs, never merges, never deploys,
-and nothing it writes should read as machine-authored.
+posts plain summaries as me**. It opens PRs only from an approved proposal (you
+review the title/description first); it never merges, never deploys, and nothing
+it writes should read as machine-authored.
 
 ---
 

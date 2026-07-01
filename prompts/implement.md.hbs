@@ -63,3 +63,29 @@ that the work was automated. Just describe the change as a developer would.
 ## Tests
 ## Notes / follow-ups
 ```
+{{#if opensPr}}
+
+## Propose the pull request
+
+No PR exists for this work yet — a human will review your proposal and open it.
+Also write:
+
+- `/workspace/PR_TITLE.md` — a single concise PR title line (imperative, no trailing period).
+- `/workspace/PR_BODY.md` — the PR description in plain, neutral voice (same voice
+  rules as the summary above).
+
+Before writing them, read `CONTRIBUTING.md` (and any `.github/` contributing
+guidance) in `/workspace` if present, and follow its PR title/description
+conventions.
+{{#if prTemplate}}
+Fill out this repository's PR template, keeping its headings and checklist; add
+content under each section and tick items you actually satisfied:
+
+```markdown
+{{prTemplate}}
+```
+{{else}}
+If the repository has no PR template, structure `PR_BODY.md` like AGENT_RESULT.md
+(Summary / Changes / Tests / Notes), expanded for reviewers.
+{{/if}}
+{{/if}}
