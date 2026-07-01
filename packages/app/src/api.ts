@@ -564,6 +564,8 @@ export function registerApi(app: FastifyInstance): void {
     if (id === null) return;
     const pending = await requirePendingReview(id, reply);
     if (!pending) return;
+    if (pending.review.trim() === "")
+      return reply.code(400).send({ error: "REVIEW.md cannot be empty when posting a comment" });
     await postIssueComment(
       getOctokit(),
       pending.task.repo_full_name,
@@ -577,7 +579,7 @@ export function registerApi(app: FastifyInstance): void {
 
   // Approve a proposal. Branch 3 (review) → submit an approving PR review.
   // Branch 1 (issue-origin implement) → bring the branch up to date with main
-  // and open the proposed PR. Both then wait on the external PR lifecycle.
+  // and open the proposed PR, then wait on the external PR lifecycle.
   app.post("/api/tasks/:id/approve", async (req, reply) => {
     if (!requireAuth(req, reply)) return;
     const id = parseId(req, reply);

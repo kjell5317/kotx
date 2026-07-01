@@ -29,7 +29,7 @@ curl -H "Authorization: Bearer $API_TOKEN" \
 | `POST /api/tasks/:id/start` | **Branch 1**: start the implementation. Only valid from `state = draft` → `queued` |
 | `GET /api/tasks/:id/review` | the `REVIEW.md` (markdown). `404` if not generated yet |
 | `PUT /api/tasks/:id/review` | edit the review before approving/commenting. Only allowed while `state = awaiting_approval`. Body: raw markdown, or JSON `{ "content": "…" }`; empty content is allowed for a bodyless approval |
-| `POST /api/tasks/:id/comment` | **Branch 3** (`kind = review`): post `REVIEW.md` as a plain PR comment. Only valid from `state = awaiting_approval` → `awaiting_external` |
+| `POST /api/tasks/:id/comment` | **Branch 3** (`kind = review`): post non-empty `REVIEW.md` as a plain PR comment. Empty or whitespace-only review text is rejected. Only valid from `state = awaiting_approval` → `awaiting_external` |
 | `GET /api/tasks/:id/pr` | **Branch 1**: the proposed PR as JSON `{ title, body }`. `404` if there's no proposal |
 | `PUT /api/tasks/:id/pr` | edit the proposed PR title/description before approving. Only allowed while `kind = implement` and `state = awaiting_approval`. Body: JSON `{ "title"?: "…", "body"?: "…" }` (send either or both) |
 | `GET /api/tasks/:id/prompt` | the exact prompt piped into Codex on the latest run (markdown). `404` until a run has started |
@@ -47,7 +47,8 @@ body**. Send it as `Content-Type: text/markdown` (or `text/plain`) with the raw
 markdown, or as `application/json` with `{ "content": "…" }`. A `PUT` with no
 recognized content type is rejected by the server with `415 Unsupported Media Type`.
 The task brief cannot be empty; the review text may be empty so `POST …/approve`
-can submit a bodyless approval. The `…/pr` `PUT` differs: it takes
+can submit a bodyless approval. `POST …/comment` requires the saved review text
+to be non-empty after trimming. The `…/pr` `PUT` differs: it takes
 `application/json` with `{ "title"?, "body"? }`.
 
 ```bash
@@ -137,7 +138,8 @@ When `canApprove` is true, `proposes` says what the approve button does: `"revie
 submits an approving PR review with `REVIEW.md` as the body (fetch via
 `GET …/review`), `"pr"` opens the proposed PR (fetch via `GET …/pr`). When
 `canComment` is true, `POST …/comment` posts the same `REVIEW.md` as a plain PR
-comment instead of approving the PR.
+comment instead of approving the PR; it is rejected if the saved review is empty
+or whitespace-only.
 
 ### Status meanings
 
@@ -174,6 +176,6 @@ comment instead of approving the PR.
   (`done`) or closes (`cancelled`).
 - **Branch 3 (review)**: a task appears with `kind=review`, `canApprove`, and
   `canComment` → `GET …/review` → either `POST …/approve` to submit an approving
-  PR review or `POST …/comment` to post it as a plain PR comment. It then stays
-  `in review` until the PR merges or closes.
+  PR review or `POST …/comment` to post non-empty review text as a plain PR
+  comment. It then stays `in review` until the PR merges or closes.
 - **Branch 2 (conflict)** runs automatically; it just shows up and pushes a fix.

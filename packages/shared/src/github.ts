@@ -74,7 +74,7 @@ export async function approvePullRequestReview(
     repo,
     pull_number: pullNumber,
     event: "APPROVE",
-    ...(trimmed === "" ? {} : { body }),
+    ...(trimmed === "" ? {} : { body: `${body}\n\n${AGENT_COMMENT_MARKER}` }),
   });
   return res.data.id;
 }

@@ -285,9 +285,9 @@ async function runResolveConflict(ctx: RunCtx, merge: MergeResult): Promise<void
     if (merge.advanced)
       await pushBranch(ctx.repoFullName, ctx.branch, gitToken());
     await finishRun(ctx.runId, { outcome: "completed", exitCode: 0, resultMd: null });
-    // If we pushed a merge, the PR is updated and waits on review/merge; if there
-    // was nothing to reconcile (clean, no advance), there's no work left → done.
-    await setTaskState(ctx.task.id, merge.advanced ? "awaiting_external" : "done");
+    // The PR's underlying implement task tracks review/merge progress; this
+    // conflict task is complete once any clean merge update is pushed.
+    await setTaskState(ctx.task.id, "done");
     await removeWorktree(ctx.repoFullName, ctx.worktreePath);
     return;
   }
@@ -296,7 +296,7 @@ async function runResolveConflict(ctx: RunCtx, merge: MergeResult): Promise<void
   });
   await finalizeWrite(ctx, guarded, merge, {
     forceWithLease: false,
-    successState: "awaiting_external",
+    successState: "done",
   });
 }
 

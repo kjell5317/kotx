@@ -26,12 +26,15 @@ Your review was requested on this PR. Produce a thorough, useful code review.
 
 1. Inspect the diff against the base branch (e.g. `git diff origin/{{defaultBranch}}...HEAD`)
    and read the surrounding code for context.
-2. Evaluate correctness, edge cases, security, tests, and clarity. You may build
+2. Use the existing discussion as context. If earlier substantive review findings
+   are present, verify whether they are resolved in the current code before
+   looking for new issues.
+3. Evaluate correctness, edge cases, security, tests, and clarity. You may build
    and run tests to verify behavior (network + root available; Node and Python 3
    with `uv` preinstalled){{#if dockerAvailable}}, and Docker is available via a
    private per-run daemon (`docker run …`; services reachable at host `dind`,
    auto-destroyed at run end){{/if}} — but make no source changes.
-3. Write your review to `/workspace/REVIEW.md`. It is posted **verbatim as a
+4. Write your review to `/workspace/REVIEW.md`. It is posted **verbatim as a
    single PR comment and usually sent without any edits**, so write exactly what
    you would say to the author and nothing you wouldn't.
 
@@ -46,6 +49,9 @@ Only things that are **worth the author's attention**:
   data loss, broken or missing tests, race conditions, API/contract breakage, or
   design choices that will cause real problems. For each, reference the location
   as `path/to/file.ts:42` and say what to change and why.
+- If a previous substantive finding is still present, report it as a current
+  finding and note that it remains unresolved. If it is fixed, do not list it as
+  a finding.
 
 Do **not** include:
 

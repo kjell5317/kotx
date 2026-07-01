@@ -24,13 +24,14 @@ Triggers are plain GitHub events (or polling) keyed to your role on the subject
 2. **Conflict (Branch 2)** — a PR assigned to you is unmergeable (`mergeable_state
    = dirty`), detected on `pull_request` synchronize/open or a `push` to the
    default branch. Codex resolves the in-progress merge automatically (no
-   approval) and pushes; the task waits for that PR to merge or close.
+   approval), pushes, and marks that conflict task done. Any underlying
+   implement/PR task tracks review and merge progress.
 3. **Review (Branch 3)** — your review is requested on a PR, or such a PR gets new
    commits. A read-only review run writes `REVIEW.md`; the task waits in
    `awaiting_approval`. `POST …/approve` submits an approving PR review using
    `REVIEW.md` as the body (or no body when the trimmed review is empty);
-   `POST …/comment` posts `REVIEW.md` as a plain PR comment. Either action moves
-   the task to waiting for that PR to merge or close.
+   `POST …/comment` posts non-empty `REVIEW.md` as a plain PR comment. Either
+   action moves the task to waiting for that PR to merge or close.
 
 Opened/reopened PRs from pushed issue branches are recorded on the task. A
 merged/closed PR closes its tracked open tasks (`done`/`cancelled`).
@@ -211,14 +212,15 @@ draft refresh, the execute run, and human edits.
   work moves to `awaiting_external` as "waiting on PR" until a PR is opened from
   that branch to the default branch, then "in review" until merge/close.
 - **resolve_conflict**: merge the default branch (leaving conflicts), Codex
-  resolves them, commit the merge + push → `awaiting_external` ("in review").
-  Conflict-marker safety net before commit.
+  resolves them, commit the merge + push → `done`. If the branch was already
+  clean but the merge advanced it, the clean merge is pushed and the task is also
+  `done`. Conflict-marker safety net before commit.
 - **review** (read-only): write `/workspace/REVIEW.md` as a ready-to-submit PR
   review body; saved to the task dir; state → `awaiting_approval`. Never commits.
   `POST …/approve` submits an approving PR review with that body (omitted when
-  empty), while `POST …/comment` posts it verbatim as a plain PR comment. Either
-  action moves the task to `awaiting_external` ("in review") until the PR merges
-  or closes.
+  empty), while `POST …/comment` posts non-empty review text as a plain PR
+  comment. Either action moves the task to `awaiting_external` ("in review")
+  until the PR merges or closes.
 
 Read-only is structural: git creds never enter the container (SPEC §12), and the
 worker simply doesn't commit/push for draft/review. Fork PRs can't be pushed to,
@@ -250,7 +252,7 @@ reused):
 
 ```text
 Branch 1: drafting → draft → (start) → queued → running → awaiting_external(waiting on PR) → awaiting_external(in review) → done
-Branch 2:                                queued → running → awaiting_external(in review) → done
+Branch 2:                                queued → running → done
 Branch 3:                                queued → running → awaiting_approval → (approve/comment) → awaiting_external(in review) → done
 any:                                     … → failed | cancelled
 ```
