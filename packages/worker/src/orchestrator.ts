@@ -207,12 +207,12 @@ async function runDraft(ctx: RunCtx): Promise<void> {
   const previousTaskBrief = ctx.followUp
     ? await loadPreviousTaskBrief(ctx)
     : null;
-  const hasTriggerBody = !!ctx.followUpInput?.body.trim();
   const guarded = await runPrompt(ctx, "draft", {
     isFollowUp: ctx.followUp,
     previousTaskBrief: previousTaskBrief ?? undefined,
     followUpInput: ctx.followUpInput,
-    needsFollowUpFallback: ctx.followUp && (!previousTaskBrief || !hasTriggerBody),
+    followUpInputHasBody: !!ctx.followUpInput?.body.trim(),
+    needsFollowUpFallback: ctx.followUp && (!previousTaskBrief || !ctx.followUpInput),
   });
   const taskMd = await readArtifact(ctx.worktreePath, "TASK.md");
   const outcome = classifyOutcome({

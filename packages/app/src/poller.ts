@@ -314,10 +314,13 @@ async function pollPrReviewActivity(
     owner,
     repo: name,
     state: "open",
+    sort: "updated",
+    direction: "desc",
     per_page: 100,
   });
 
   for (const pr of prs.data) {
+    if (!isAtOrAfterCursor(pr.updated_at, cursor)) break;
     const assignees = logins(pr.assignees);
     if (!assignees.includes(me)) continue;
     const subject: NormalizedSubject = {

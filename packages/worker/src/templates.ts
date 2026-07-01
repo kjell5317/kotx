@@ -36,6 +36,7 @@ export interface TaskContext {
   // draft follow-up only: prior reviewed TASK.md plus latest triggering input.
   previousTaskBrief?: string;
   followUpInput?: DraftFollowUpInput;
+  followUpInputHasBody?: boolean;
   needsFollowUpFallback?: boolean;
   // implement only: the approved TASK.md brief, embedded as the instructions.
   taskBrief?: string;

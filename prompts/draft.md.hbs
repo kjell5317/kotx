@@ -25,11 +25,13 @@ implement task.
 {{/if}}
 
 ## Latest triggering input
-{{#if followUpInput.body}}
+{{#if followUpInput}}
 From **{{followUpInput.authorLogin}}**{{#if followUpInput.eventLabel}} via {{followUpInput.eventLabel}}{{/if}}{{#if followUpInput.location}} · {{followUpInput.location}}{{/if}}{{#if followUpInput.htmlUrl}}:
 {{followUpInput.htmlUrl}}{{else}}:{{/if}}
 
+{{#if followUpInputHasBody}}
 {{followUpInput.body}}
+{{/if}}
 {{else}}
 Missing: this queued draft did not include the triggering comment or review body.
 {{/if}}
