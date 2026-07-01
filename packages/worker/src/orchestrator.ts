@@ -71,9 +71,23 @@ function subjectKindWord(task: Task): string {
   return task.subject_type === "pull_request" ? "pull request" : "issue";
 }
 
-/** Frontend URL opened when tapping a Home Assistant notification. */
-function notifyUrl(): string | undefined {
-  return loadEnv().corsOrigin;
+/** Frontend URL opened when tapping a Home Assistant notification. Deep-links
+ * to the specific run via the frontend's `#run/<id>` hash route. */
+function notifyUrl(runId: number): string | undefined {
+  const base = loadEnv().corsOrigin;
+  return base ? `${base.replace(/\/$/, "")}#run/${runId}` : undefined;
+}
+
+/** Human-readable run type for notification titles (e.g. "Review", "Draft"). */
+function jobTypeLabel(job: TaskJob): string {
+  switch (job.kind) {
+    case "review":
+      return "Review";
+    case "resolve_conflict":
+      return "Conflict resolution";
+    case "implement":
+      return job.phase === "draft" ? "Draft" : "Implementation";
+  }
 }
 
 const STATE_WORD: Record<string, string> = {
@@ -491,10 +505,10 @@ export async function processJob(job: TaskJob): Promise<void> {
     await markRunStarted(run.id, name, join(runOutputDir, "codex.jsonl"));
     await mkdir(runOutputDir, { recursive: true });
     await notify({
-      title: `${subjectLabel(task)} started`,
+      title: `${jobTypeLabel(job)}: ${subjectLabel(task)} started`,
       message: task.repo_full_name,
       tag: `kotx-task-${task.id}`,
-      url: notifyUrl(),
+      url: notifyUrl(run.id),
     });
     started = true;
 
@@ -597,10 +611,10 @@ export async function processJob(job: TaskJob): Promise<void> {
           ? `${task.repo_full_name} — ${failureReason}`
           : task.repo_full_name;
       await notify({
-        title: `${subjectLabel(task)} ${STATE_WORD[state] ?? state}`,
+        title: `${jobTypeLabel(job)}: ${subjectLabel(task)} ${STATE_WORD[state] ?? state}`,
         message,
         tag: `kotx-task-${task.id}`,
-        url: notifyUrl(),
+        url: notifyUrl(run.id),
       }).catch(() => {});
     }
     await releaseRepoSlot(task.repo_full_name, slot, holderId).catch(() => {});
