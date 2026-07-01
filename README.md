@@ -47,6 +47,7 @@ All `/api/*` routes require `Authorization: Bearer $API_TOKEN`.
 
 | Method & path | Purpose |
 | --- | --- |
+| `POST /api/runs` | manually enqueue `implement`, `review`, or `resolve` for a GitHub issue/PR number |
 | `GET /api/tasks?scope=active\|all` | tasks where you're assignee or reviewer, with `status` (e.g. *awaiting approval*, *in review*) |
 | `GET /api/tasks/:id` | one task |
 | `GET /api/tasks/:id/task` | the `TASK.md` brief |
@@ -54,7 +55,7 @@ All `/api/*` routes require `Authorization: Bearer $API_TOKEN`.
 | `POST /api/tasks/:id/start` | start the implementation (Branch 1, draft → queued) |
 | `GET /api/tasks/:id/review` | the `REVIEW.md` |
 | `POST /api/tasks/:id/approve` | post `REVIEW.md` to the PR (Branch 3) |
-| `POST /api/tasks/:id/stop` | cancel a task |
+| `POST /api/tasks/:id/discard` | dismiss or cancel a non-terminal task |
 | `GET /api/containers` | live `docker ps` of the running codex runners |
 
 ## Setup

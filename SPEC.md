@@ -411,11 +411,13 @@ uses the configured `container.network` and Codex has no Docker access.
 `/api/*` is gated by `Authorization: Bearer $API_TOKEN` (timing-safe compare;
 503 if `API_TOKEN` is unset). `CORS_ORIGIN` enables the browser frontend.
 Endpoints: `GET /api/tasks?scope=active|all`, `GET /api/tasks/:id`,
+`POST /api/runs` (manual `implement`/`review`/`resolve` by GitHub issue/PR
+number; requires exactly one enabled repo because the body has no repo field),
 `GET|PUT /api/tasks/:id/task`, `GET|PUT /api/tasks/:id/review`,
 `GET /api/tasks/:id/prompt` (the exact Codex prompt) and `…/log` (a JSON page
 of the latest run transcript, newest 200 JSONL entries by default; `limit`
 1..1000 and `before` byte cursor for older pages),
-`POST /api/tasks/:id/{start,approve,stop,discard}`,
+`POST /api/tasks/:id/{start,approve,discard}`,
 `GET /api/containers`. `discard` moves a task of any kind to `cancelled` with a
 discard reason. See [API.md](API.md) for the table.
 
@@ -427,7 +429,7 @@ discard reason. See [API.md](API.md) for the table.
 |------|----------|-----|
 | GitHub auth | private GitHub App + installation tokens | personal PAT (acts as me) |
 | Input | webhooks only | webhooks **and** per-repo polling |
-| HITL | stop + `HITL_REQUEST.json` + approve/reject + resume | **removed**; agent runs autonomously |
+| HITL | `HITL_REQUEST.json` + approve/reject + resume | **removed**; agent runs autonomously |
 | Output | open/update PR + structured review | push branch + plain summary comment; **no PR** |
 | Review mode | read-only review comment | **work on the PR's branch** + push |
 | Branch | `agent/issue-N` | GitHub-style `<n>-<slug>` (issues); PR head (PRs) |
@@ -436,7 +438,7 @@ discard reason. See [API.md](API.md) for the table.
 | CODEX_HOME | read-only shared mount | private writable per-run copy |
 | Runner image | Node only | Node + Python + uv; runs as root; pulls more at runtime |
 | Images | built on the VPS | CI → GHCR; compose pulls; auto-migrate |
-| Commands | run/review/stop/status/approve/reject | run/review/stop/status |
+| Commands | run/review/status/approve/reject | run/review/status |
 
 ## 14. Changelog v2 → v3
 
