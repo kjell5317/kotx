@@ -76,7 +76,7 @@ function subjectKindWord(task: Task): string {
  * to the run's modal via the frontend's `#run/<id>` hash route. */
 function notifyUrl(runId: number): string | undefined {
   const base = loadEnv().corsOrigin;
-  return base ? `${base.replace(/\/$/, "")}#run/${runId}` : undefined;
+  return base ? `${base.replace(/\/$/, "")}/#run/${runId}` : undefined;
 }
 
 const TITLE_MAX = 60;

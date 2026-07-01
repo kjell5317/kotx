@@ -884,19 +884,16 @@ export function registerApi(app: FastifyInstance): void {
         return reply.code(404).send({ error: "no PR proposal to open" });
 
       const octokit = getOctokit();
-      // Auto-rebase: merge the default branch into the feature branch first.
-      const merged = await updateBranchFromBase(
+      // Auto-rebase: merge the default branch into the feature branch first. A
+      // "conflict" here just means the branch can't fast-merge base — that's
+      // fine, the PR opens as unmergeable and the resolve_conflict pipeline
+      // (it's assigned to me) picks it up. Don't block opening on it.
+      await updateBranchFromBase(
         octokit,
         task.repo_full_name,
         task.branch_name,
         repo.default_branch,
       );
-      if (merged === "conflict") {
-        const reason =
-          "branch conflicts with the default branch — re-run the task to merge it";
-        await setTaskState(id, "awaiting_approval", reason);
-        return reply.code(409).send({ error: reason });
-      }
 
       const pr = await openPullRequest(octokit, task.repo_full_name, {
         title,
