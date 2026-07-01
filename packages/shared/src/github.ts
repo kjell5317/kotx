@@ -60,6 +60,25 @@ export async function postIssueComment(
   return res.data.id;
 }
 
+/** Submit an approving PR review. Returns the review id. */
+export async function approvePullRequestReview(
+  octokit: Octokit,
+  repoFullName: string,
+  pullNumber: number,
+  body: string,
+): Promise<number> {
+  const [owner, repo] = splitRepo(repoFullName);
+  const trimmed = body.trim();
+  const res = await octokit.pulls.createReview({
+    owner,
+    repo,
+    pull_number: pullNumber,
+    event: "APPROVE",
+    ...(trimmed === "" ? {} : { body }),
+  });
+  return res.data.id;
+}
+
 /** Open a pull request. Returns the new PR's number and html url. */
 export async function openPullRequest(
   octokit: Octokit,

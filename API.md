@@ -28,12 +28,13 @@ curl -H "Authorization: Bearer $API_TOKEN" \
 | `PUT /api/tasks/:id/task` | overwrite the brief before starting. Only allowed while `state = draft`. Body: raw markdown, or JSON `{ "content": "…" }` |
 | `POST /api/tasks/:id/start` | **Branch 1**: start the implementation. Only valid from `state = draft` → `queued` |
 | `GET /api/tasks/:id/review` | the `REVIEW.md` (markdown). `404` if not generated yet |
-| `PUT /api/tasks/:id/review` | edit the review before approving. Only allowed while `state = awaiting_approval`. Body: raw markdown, or JSON `{ "content": "…" }` |
+| `PUT /api/tasks/:id/review` | edit the review before approving/commenting. Only allowed while `state = awaiting_approval`. Body: raw markdown, or JSON `{ "content": "…" }`; empty content is allowed for a bodyless approval |
+| `POST /api/tasks/:id/comment` | **Branch 3** (`kind = review`): post `REVIEW.md` as a plain PR comment. Only valid from `state = awaiting_approval` → `awaiting_external` |
 | `GET /api/tasks/:id/pr` | **Branch 1**: the proposed PR as JSON `{ title, body }`. `404` if there's no proposal |
 | `PUT /api/tasks/:id/pr` | edit the proposed PR title/description before approving. Only allowed while `kind = implement` and `state = awaiting_approval`. Body: JSON `{ "title"?: "…", "body"?: "…" }` (send either or both) |
 | `GET /api/tasks/:id/prompt` | the exact prompt piped into Codex on the latest run (markdown). `404` until a run has started |
 | `GET /api/tasks/:id/log` | a bounded JSON page of the latest run's Codex transcript. Defaults to the newest 50 JSONL entries; `404` until a log exists |
-| `POST /api/tasks/:id/approve` | approve the proposal (see `proposes`). **Branch 3** (`kind = review`): post `REVIEW.md` as a PR comment. **Branch 1** (`kind = implement`): merge the default branch into the pushed branch and open the proposed PR (returns `{ ok, prNumber, prUrl }`). `409` if the branch conflicts with the default branch (re-run to merge). Only valid from `state = awaiting_approval` → `awaiting_external` |
+| `POST /api/tasks/:id/approve` | approve the proposal (see `proposes`). **Branch 3** (`kind = review`): submit an approving PR review using `REVIEW.md` as the body; if the trimmed review is empty, the approval has no body. **Branch 1** (`kind = implement`): merge the default branch into the pushed branch and open the proposed PR (returns `{ ok, prNumber, prUrl }`). `409` if the branch conflicts with the default branch (re-run to merge). Only valid from `state = awaiting_approval` → `awaiting_external` |
 | `POST /api/tasks/:id/stop` | cancel the task (signals the worker / kills the container). `409` if already terminal |
 | `POST /api/tasks/:id/discard` | dismiss a task of any kind from the active list → `state = cancelled`, with `stateReason = "discarded from the API"`. Also signals cancel. `409` if already terminal |
 | `GET /api/containers` | live `docker ps` of the running codex runners |
@@ -45,7 +46,9 @@ The `…/task` and `…/review` `PUT` endpoints take the new content as the **re
 body**. Send it as `Content-Type: text/markdown` (or `text/plain`) with the raw
 markdown, or as `application/json` with `{ "content": "…" }`. A `PUT` with no
 recognized content type is rejected by the server with `415 Unsupported Media Type`.
-The `…/pr` `PUT` differs: it takes `application/json` with `{ "title"?, "body"? }`.
+The task brief cannot be empty; the review text may be empty so `POST …/approve`
+can submit a bodyless approval. The `…/pr` `PUT` differs: it takes
+`application/json` with `{ "title"?, "body"? }`.
 
 ```bash
 # raw markdown
@@ -122,7 +125,8 @@ curl -H "Authorization: Bearer $TOKEN" \
   "updatedAt": "2026-06-30T10:00:05.000Z",
   "githubUrl": "https://github.com/owner/repo/issues/31",
   "canStart": true,                // POST …/start is valid now
-  "canApprove": false,             // POST …/approve is valid now (review or PR proposal)
+  "canApprove": false,             // POST …/approve is valid now (PR review approval or PR proposal)
+  "canComment": false,             // POST …/comment is valid now (review tasks only)
   "proposes": null,                // what approve does: "review" | "pr" | null
   "canStop": true                  // POST …/stop is valid now
 }
@@ -130,15 +134,17 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 Use `status` for display and the `can*` flags to decide which buttons to show.
 When `canApprove` is true, `proposes` says what the approve button does: `"review"`
-posts `REVIEW.md` (fetch via `GET …/review`), `"pr"` opens the proposed PR (fetch via
-`GET …/pr`).
+submits an approving PR review with `REVIEW.md` as the body (fetch via
+`GET …/review`), `"pr"` opens the proposed PR (fetch via `GET …/pr`). When
+`canComment` is true, `POST …/comment` posts the same `REVIEW.md` as a plain PR
+comment instead of approving the PR.
 
 ### Status meanings
 
 | status | meaning |
 | --- | --- |
 | `preparing task` | draft run in flight (`drafting`) |
-| `awaiting approval` | a `TASK.md` is ready to start, or a `REVIEW.md` is ready to post |
+| `awaiting approval` | a `TASK.md` is ready to start, or a `REVIEW.md` is ready to approve/comment |
 | `queued` / `running` | execution is queued / a container is running |
 | `waiting on PR` | issue work has been pushed to `branch`, but no PR from that branch to the default branch has been found yet |
 | `in review` | a relevant PR is known; waiting for it to merge or close |
@@ -166,7 +172,8 @@ posts `REVIEW.md` (fetch via `GET …/review`), `"pr"` opens the proposed PR (fe
   proposed PR via `GET …/pr` (optionally `PUT …/pr` to edit the title/body) →
   `POST …/approve` to open the PR. It then shows `in review` until that PR merges
   (`done`) or closes (`cancelled`).
-- **Branch 3 (review)**: a task appears with `kind=review`, `canApprove` →
-  `GET …/review` → `POST …/approve` to post it to the PR, then it stays `in
-  review` until the PR merges or closes.
+- **Branch 3 (review)**: a task appears with `kind=review`, `canApprove`, and
+  `canComment` → `GET …/review` → either `POST …/approve` to submit an approving
+  PR review or `POST …/comment` to post it as a plain PR comment. It then stays
+  `in review` until the PR merges or closes.
 - **Branch 2 (conflict)** runs automatically; it just shows up and pushes a fix.
