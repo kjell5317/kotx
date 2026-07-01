@@ -28,6 +28,7 @@ import {
   type RunOutcome,
   type Task,
   type TaskJob,
+  type TaskKind,
   type TaskState,
 } from "@kotx/shared";
 import { ensureFreshAuth } from "./codexAuth.js";
@@ -72,32 +73,34 @@ function subjectKindWord(task: Task): string {
 }
 
 /** Frontend URL opened when tapping a Home Assistant notification. Deep-links
- * to the specific run via the frontend's `#run/<id>` hash route. */
+ * to the run's modal via the frontend's `#run/<id>` hash route. */
 function notifyUrl(runId: number): string | undefined {
   const base = loadEnv().corsOrigin;
   return base ? `${base.replace(/\/$/, "")}#run/${runId}` : undefined;
 }
 
-/** Human-readable run type for notification titles (e.g. "Review", "Draft"). */
-function jobTypeLabel(job: TaskJob): string {
-  switch (job.kind) {
-    case "review":
-      return "Review";
-    case "resolve_conflict":
-      return "Conflict resolution";
-    case "implement":
-      return job.phase === "draft" ? "Draft" : "Implementation";
-  }
+const TITLE_MAX = 60;
+
+/** Notification title: subject + truncated GitHub title, e.g.
+ * "PR #123 Fix the flaky login test". */
+function notificationTitle(task: Task): string {
+  const raw = task.subject_title?.trim() ?? "";
+  const title =
+    raw.length > TITLE_MAX ? `${raw.slice(0, TITLE_MAX - 1).trimEnd()}…` : raw;
+  return title ? `${subjectLabel(task)} ${title}` : subjectLabel(task);
 }
 
-const STATE_WORD: Record<string, string> = {
-  draft: "ready for your review",
-  awaiting_approval: "review ready",
-  awaiting_external: "pushed",
-  done: "completed",
-  failed: "failed",
-  cancelled: "cancelled",
-};
+/**
+ * The pending action a terminal state expects of me, or undefined if the state
+ * needs nothing from me. Only action-needed states (and failures, handled
+ * separately) produce a notification.
+ */
+function pendingAction(state: TaskState, kind: TaskKind): string | undefined {
+  if (state === "draft") return "Start implementation";
+  if (state === "awaiting_approval")
+    return kind === "review" ? "Comment review" : "Open PR";
+  return undefined;
+}
 
 interface Guarded {
   exitCode: number;
@@ -504,12 +507,6 @@ export async function processJob(job: TaskJob): Promise<void> {
     await setTaskState(task.id, job.phase === "draft" ? "drafting" : "running");
     await markRunStarted(run.id, name, join(runOutputDir, "codex.jsonl"));
     await mkdir(runOutputDir, { recursive: true });
-    await notify({
-      title: `${jobTypeLabel(job)}: ${subjectLabel(task)} started`,
-      message: task.repo_full_name,
-      tag: `kotx-task-${task.id}`,
-      url: notifyUrl(run.id),
-    });
     started = true;
 
     const octokit = getOctokit();
@@ -603,19 +600,23 @@ export async function processJob(job: TaskJob): Promise<void> {
     if (started) {
       const fresh = await getTask(task.id).catch(() => undefined);
       const state = fresh?.state ?? "failed";
-      // include the failure reason in the message so the push notification is
-      // actionable (e.g. "Codex exited with code 1", "the run timed out").
+      // Only notify when I have to do something (a pending action) or when the
+      // run failed. In-flight, pushed, cancelled and done states are silent.
       const isFailed = state === "failed";
-      const message =
-        isFailed && failureReason
-          ? `${task.repo_full_name} — ${failureReason}`
-          : task.repo_full_name;
-      await notify({
-        title: `${jobTypeLabel(job)}: ${subjectLabel(task)} ${STATE_WORD[state] ?? state}`,
-        message,
-        tag: `kotx-task-${task.id}`,
-        url: notifyUrl(run.id),
-      }).catch(() => {});
+      const action = pendingAction(state, job.kind);
+      if (isFailed || action) {
+        const message = isFailed
+          ? failureReason
+            ? `Failed — ${failureReason}`
+            : "Failed"
+          : (action as string);
+        await notify({
+          title: notificationTitle(task),
+          message,
+          tag: `kotx-task-${task.id}`,
+          url: notifyUrl(run.id),
+        }).catch(() => {});
+      }
     }
     await releaseRepoSlot(task.repo_full_name, slot, holderId).catch(() => {});
     await clearCancelFlag(task.id).catch(() => {});
