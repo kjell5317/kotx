@@ -33,7 +33,7 @@ curl -H "Authorization: Bearer $API_TOKEN" \
 | `PUT /api/tasks/:id/pr` | edit the proposed PR title/description before approving. Only allowed while `kind = implement` and `state = awaiting_approval`. Body: JSON `{ "title"?: "…", "body"?: "…" }` (send either or both) |
 | `GET /api/tasks/:id/prompt` | the exact prompt piped into Codex on the latest run (markdown). `404` until a run has started |
 | `GET /api/tasks/:id/log` | a bounded JSON page of the latest run's Codex transcript. Defaults to the newest 50 JSONL entries; `404` until a log exists |
-| `POST /api/tasks/:id/approve` | approve the proposal (see `proposes`). **Branch 3** (`kind = review`): post `REVIEW.md` as a PR comment. **Branch 1** (`kind = implement`): merge the default branch into the pushed branch and open the proposed PR (returns `{ ok, prNumber, prUrl }`). `409` if the branch conflicts with the default branch (re-run to merge). Only valid from `state = awaiting_approval` → `awaiting_external` |
+| `POST /api/tasks/:id/approve` | approve the proposal (see `proposes`). **Branch 3** (`kind = review`): post `REVIEW.md` as a PR comment and mark the task `done`. **Branch 1** (`kind = implement`): merge the default branch into the pushed branch and open the proposed PR (returns `{ ok, prNumber, prUrl }`), then mark it `awaiting_external`. `409` if the branch conflicts with the default branch (re-run to merge). Only valid from `state = awaiting_approval` |
 | `POST /api/tasks/:id/stop` | cancel the task (signals the worker / kills the container). `409` if already terminal |
 | `POST /api/tasks/:id/discard` | dismiss a task of any kind from the active list → `state = cancelled`, with `stateReason = "discarded from the API"`. Also signals cancel. `409` if already terminal |
 | `GET /api/containers` | live `docker ps` of the running codex runners |
@@ -167,6 +167,6 @@ posts `REVIEW.md` (fetch via `GET …/review`), `"pr"` opens the proposed PR (fe
   `POST …/approve` to open the PR. It then shows `in review` until that PR merges
   (`done`) or closes (`cancelled`).
 - **Branch 3 (review)**: a task appears with `kind=review`, `canApprove` →
-  `GET …/review` → `POST …/approve` to post it to the PR, then it stays `in
-  review` until the PR merges or closes.
-- **Branch 2 (conflict)** runs automatically; it just shows up and pushes a fix.
+  `GET …/review` → `POST …/approve` to post it to the PR, then it is `done`.
+- **Branch 2 (conflict)** runs automatically; it just shows up, pushes a fix,
+  and becomes `done`.

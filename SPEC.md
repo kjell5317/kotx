@@ -24,11 +24,12 @@ Triggers are plain GitHub events (or polling) keyed to your role on the subject
 2. **Conflict (Branch 2)** — a PR assigned to you is unmergeable (`mergeable_state
    = dirty`), detected on `pull_request` synchronize/open or a `push` to the
    default branch. Codex resolves the in-progress merge automatically (no
-   approval) and pushes; the task waits for that PR to merge or close.
+   approval), pushes, and marks that conflict task done. Any underlying
+   implement/PR task tracks review and merge progress.
 3. **Review (Branch 3)** — your review is requested on a PR, or such a PR gets new
    commits. A read-only review run writes `REVIEW.md`; the task waits in
    `awaiting_approval`. `POST …/approve` posts it as a PR comment, then the task
-   waits for that PR to merge or close.
+   is `done`.
 
 Opened/reopened PRs from pushed issue branches are recorded on the task. A
 merged/closed PR closes its tracked open tasks (`done`/`cancelled`).
@@ -209,12 +210,12 @@ draft refresh, the execute run, and human edits.
   work moves to `awaiting_external` as "waiting on PR" until a PR is opened from
   that branch to the default branch, then "in review" until merge/close.
 - **resolve_conflict**: merge the default branch (leaving conflicts), Codex
-  resolves them, commit the merge + push → `awaiting_external` ("in review").
-  Conflict-marker safety net before commit.
+  resolves them, commit the merge + push → `done`. If the branch was already
+  clean but the merge advanced it, the clean merge is pushed and the task is also
+  `done`. Conflict-marker safety net before commit.
 - **review** (read-only): write `/workspace/REVIEW.md` as a ready-to-post PR
   comment; saved to the task dir; state → `awaiting_approval`. Never commits.
-  `POST …/approve` posts it verbatim → `awaiting_external` ("in review") until
-  the PR merges or closes.
+  `POST …/approve` posts it verbatim → `done`.
 
 Read-only is structural: git creds never enter the container (SPEC §12), and the
 worker simply doesn't commit/push for draft/review. Fork PRs can't be pushed to,
@@ -246,8 +247,8 @@ reused):
 
 ```text
 Branch 1: drafting → draft → (start) → queued → running → awaiting_external(waiting on PR) → awaiting_external(in review) → done
-Branch 2:                                queued → running → awaiting_external(in review) → done
-Branch 3:                                queued → running → awaiting_approval → (approve) → awaiting_external(in review) → done
+Branch 2:                                queued → running → done
+Branch 3:                                queued → running → awaiting_approval → (approve) → done
 any:                                     … → failed | cancelled
 ```
 
