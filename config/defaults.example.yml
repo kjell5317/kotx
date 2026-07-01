@@ -1,11 +1,11 @@
 # Global defaults. Per-repo overrides live in repos.yml.
 # auto_merge / auto_deploy are INVARIANTS — not overridable anywhere (see SPEC §14).
 concurrency:
-  max_global_workers: 2
+  max_global_workers: 3
   max_workers_per_repo: 2
 
 timeouts:
-  task_wall_clock_sec: 1800 # hard kill of a codex-runner container
+  task_wall_clock_sec: 3200 # hard kill of a codex-runner container
   awaiting_approval_ttl_sec: 172800 # 48h, then auto-cancel the HITL + task
   repo_lock_buffer_sec: 120 # lock TTL = wall_clock + buffer
 

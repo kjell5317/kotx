@@ -5,6 +5,10 @@ dist/
 .env.local
 *.log
 
+# live operator config — copied from the committed *.example.yml templates
+/config/defaults.yml
+/config/repos.yml
+
 # host data dirs (should live under /srv/agent in prod, never committed)
 /srv/
 runs/
