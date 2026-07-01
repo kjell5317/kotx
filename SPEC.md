@@ -155,20 +155,27 @@ The agent therefore acts as **me**. No GitHub App, no installation tokens.
 - **Polling** (`poll: true`): the app polls every `POLL_INTERVAL_SEC` for repos
   where I can't register a webhook. It diffs GitHub state against existing tasks
   to find new assignments, review requests, conflicts, and follow-up comments or
-  PR reviews — **no labels or commands**. Without a label to clear,
-  assignment/review triggers fire at most once per subject (`hasAnyTask` guard);
-  follow-ups arrive via cursors and `github_deliveries` de-dupe; conflict checks
-  self-limit (only fire when the PR is dirty and has no active task).
+  PR reviews — **no labels or commands**. Without a label to clear, the initial
+  assignment/review trigger fires at most once per subject (`hasAnyTask` guard);
+  a reviewed PR re-reviews when its head advances past the stored
+  `reviewed_head_sha` (poll-mode stand-in for `synchronize`) or when a new
+  comment/review lands on it; follow-ups arrive via cursors and
+  `github_deliveries` de-dupe; conflict checks self-limit (only fire when the PR
+  is dirty and has no active task).
 
 ### 5.3 Triggers (no labels, no commands)
 All labels (`agent:*`) and `/agent` commands were **removed** in v3. Triggers are
 the three role-aware workflows in §0, driven by webhook events:
 
 - `issues` assigned / `issue_comment` / `pull_request_review[_comment]` on a
-  subject I'm assigned to → Branch 1 (draft). My own comments are ignored (the
-  agent comments as me — this prevents a self-loop).
-- `pull_request` review_requested (me) / synchronize while my review is requested
-  → Branch 3.
+  subject I'm assigned to → Branch 1 (draft) — unless it's a PR I'm reviewing, in
+  which case it re-reviews (Branch 3). The agent's own comments are ignored via a
+  hidden marker (it comments as me — this prevents a self-loop).
+- `pull_request` review_requested (me) / synchronize → Branch 3. A PR I've
+  already reviewed also re-reviews on new commits or on a new comment/review
+  (`issue_comment` / `pull_request_review[_comment]`), keyed on an existing
+  review task rather than requested-reviewer membership (GitHub drops me from
+  requested reviewers once I've reviewed).
 - `pull_request` synchronize/open + `push` to the default branch, for PRs assigned
   to me → Branch 2 (only when `mergeable_state = dirty`).
 - `pull_request` opened/reopened from a pushed issue branch → record the PR and

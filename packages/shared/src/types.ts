@@ -83,6 +83,8 @@ export interface Task {
   state_reason: string | null;
   branch_name: string | null;
   pr_number: number | null;
+  // review kind: the PR head SHA the latest review run was performed against.
+  reviewed_head_sha: string | null;
   triggered_by: string;
   trigger_comment_url: string | null;
   created_at: Date;

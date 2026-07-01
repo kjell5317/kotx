@@ -141,6 +141,12 @@ export async function findConflictMarkers(
   }
 }
 
+/** The commit SHA currently checked out in the worktree (git rev-parse HEAD). */
+export async function headSha(worktreePath: string): Promise<string> {
+  const { stdout } = await run("git", ["-C", worktreePath, "rev-parse", "HEAD"]);
+  return stdout.trim();
+}
+
 /**
  * Merge the (already-fetched) default branch into the current worktree branch
  * before the agent starts, so it builds on top of the latest main.

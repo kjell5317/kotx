@@ -399,10 +399,17 @@ export async function ingest(n: Normalized): Promise<IngestResult> {
   // follow-up from the agent's own account still triggers; only the agent's own
   // posts (carrying the marker) are skipped to avoid a self-loop.
   if (n.comment) {
-    if (!subject.assignees.includes(me))
-      return { status: "ignored", reason: "not-assigned-to-me" };
     if (isAgentComment(n.comment.body))
       return { status: "ignored", reason: "agent-comment" };
+    // A comment/review on a PR I'm reviewing → re-review (Branch 3); a comment on
+    // a subject I'm assigned to → Branch 1 follow-up.
+    const iReview =
+      subject.type === "pull_request" &&
+      (subject.requestedReviewers.includes(me) ||
+        (await hasReviewTask(repo.full_name, subject.number)));
+    if (iReview) return startReview(repo, subject, n.comment.authorLogin);
+    if (!subject.assignees.includes(me))
+      return { status: "ignored", reason: "not-assigned-to-me" };
     return startDraft(
       repo,
       subject,

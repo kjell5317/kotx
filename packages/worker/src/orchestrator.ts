@@ -19,6 +19,7 @@ import {
   maxWorkersForRepo,
   releaseRepoSlot,
   runDirFor,
+  setReviewedHeadSha,
   setTaskBranch,
   setTaskState,
   taskDirFor,
@@ -35,6 +36,7 @@ import {
   commitAll,
   ensureMirrorFetched,
   findConflictMarkers,
+  headSha,
   issueBranchName,
   mergeDefaultBranch,
   mirrorPath,
@@ -318,6 +320,10 @@ async function runReview(ctx: RunCtx): Promise<void> {
   if (outcome === "completed" && reviewMd) {
     await mkdir(ctx.taskDir, { recursive: true });
     await writeFile(join(ctx.taskDir, "REVIEW.md"), reviewMd, "utf8");
+    // Record the reviewed PR head so poll mode can detect later commits and
+    // re-review (the durable equivalent of the webhook `synchronize` signal).
+    const sha = await headSha(ctx.worktreePath).catch(() => null);
+    if (sha) await setReviewedHeadSha(ctx.task.id, sha);
     await setTaskState(ctx.task.id, "awaiting_approval");
   } else {
     ctx.setReason(describeRunFailure(outcome, guarded.exitCode));
