@@ -1,4 +1,4 @@
-import type { SubjectType } from "@kotx/shared";
+import type { DraftFollowUpInput, SubjectType } from "@kotx/shared";
 
 export interface NormalizedSubject {
   type: SubjectType;
@@ -25,7 +25,7 @@ export interface Normalized {
   // who was just assigned / requested for review in this action (assigned,
   // review_requested) — lets us check it's me without re-listing.
   targetLogin?: string;
-  comment?: { body: string; authorLogin: string; htmlUrl: string };
+  comment?: DraftFollowUpInput;
   // push events: the fully-qualified ref that was pushed (refs/heads/<branch>).
   pushRef?: string;
 }
@@ -98,6 +98,7 @@ export function normalize(event: string, payload: any): Normalized | null {
           body: payload.comment?.body ?? "",
           authorLogin: payload.comment?.user?.login ?? "",
           htmlUrl: payload.comment?.html_url ?? "",
+          eventLabel: "comment",
         },
       };
     case "pull_request_review":
@@ -109,6 +110,10 @@ export function normalize(event: string, payload: any): Normalized | null {
           body: payload.review?.body ?? "",
           authorLogin: payload.review?.user?.login ?? "",
           htmlUrl: payload.review?.html_url ?? "",
+          eventLabel: "review",
+          location: payload.review?.state
+            ? `review: ${String(payload.review.state).toLowerCase()}`
+            : undefined,
         },
       };
     case "pull_request_review_comment":
@@ -120,6 +125,12 @@ export function normalize(event: string, payload: any): Normalized | null {
           body: payload.comment?.body ?? "",
           authorLogin: payload.comment?.user?.login ?? "",
           htmlUrl: payload.comment?.html_url ?? "",
+          eventLabel: "inline review comment",
+          location: payload.comment?.path
+            ? `${payload.comment.path}:${
+                payload.comment?.line ?? payload.comment?.original_line ?? "?"
+              }`
+            : undefined,
         },
       };
     case "push":

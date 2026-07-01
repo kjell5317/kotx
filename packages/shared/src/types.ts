@@ -109,6 +109,14 @@ export interface TaskRun {
 // press start ("execute"). Other kinds always run a single "execute" phase.
 export type JobPhase = "draft" | "execute";
 
+export interface DraftFollowUpInput {
+  body: string;
+  authorLogin: string;
+  htmlUrl: string | null;
+  eventLabel?: string;
+  location?: string;
+}
+
 export interface TaskJob {
   taskId: number;
   taskRunId: number;
@@ -116,6 +124,8 @@ export interface TaskJob {
   phase: JobPhase;
   repoFullName: string;
   subject: { type: SubjectType; number: number };
+  // Branch 1 draft only: the new comment/review that triggered this draft.
+  followUpInput?: DraftFollowUpInput;
 }
 
 export const TASK_QUEUE_NAME = "tasks";

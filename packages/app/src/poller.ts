@@ -9,6 +9,7 @@ import {
   recordDelivery,
   splitRepo,
   type RepoConfig,
+  type DraftFollowUpInput,
 } from "@kotx/shared";
 import type { Octokit } from "@octokit/rest";
 import type { NormalizedSubject } from "./extract.js";
@@ -30,6 +31,7 @@ const RECONCILE_INTERVAL_MS =
 const INITIAL_LOOKBACK_MS = 60 * 60 * 1000;
 
 const commentCursor = new Map<string, string>();
+const prReviewCursor = new Map<string, string>();
 
 // Per repo#pr, the PR head SHA we last triggered a review for. In-memory like
 // commentCursor: lets poll mode re-review when new commits land (what webhooks
@@ -99,6 +101,7 @@ async function pollRepo(repo: RepoConfig): Promise<void> {
   await pollIssues(octokit, owner, name, repo, me);
   await pollPulls(octokit, owner, name, repo, me);
   await pollComments(octokit, owner, name, repo, me);
+  await pollPrReviewActivity(octokit, owner, name, repo, me);
 }
 
 async function reconcileInReview(repo: RepoConfig): Promise<void> {
@@ -218,6 +221,20 @@ function issueNumberFromUrl(url: string | undefined): number | null {
   return m ? Number(m[1]) : null;
 }
 
+function isAtOrAfterCursor(when: string | null | undefined, cursor: string): boolean {
+  if (!when) return false;
+  return Date.parse(when) >= Date.parse(cursor);
+}
+
+function inlineLocation(c: {
+  path?: string | null;
+  line?: number | null;
+  original_line?: number | null;
+}): string | undefined {
+  if (!c.path) return undefined;
+  return `${c.path}:${c.line ?? c.original_line ?? "?"}`;
+}
+
 /** New comments by others on subjects assigned to me → follow-up draft. */
 async function pollComments(
   octokit: Octokit,
@@ -265,11 +282,113 @@ async function pollComments(
         title: it.title ?? "",
         body: it.body ?? "",
       };
-      await startDraft(repo, subject, author, c.html_url ?? null);
+      const followUpInput: DraftFollowUpInput = {
+        body: c.body ?? "",
+        authorLogin: author,
+        htmlUrl: c.html_url ?? null,
+        eventLabel: "comment",
+      };
+      await startDraft(repo, subject, author, c.html_url ?? null, followUpInput);
     } catch (err) {
       logger.warn({ err, issueNumber }, "poll: failed to handle comment");
     }
   }
 
   commentCursor.set(repo.full_name, tickStart);
+}
+
+/** New PR review bodies and inline review comments on PRs assigned to me. */
+async function pollPrReviewActivity(
+  octokit: Octokit,
+  owner: string,
+  name: string,
+  repo: RepoConfig,
+  me: string,
+): Promise<void> {
+  const cursor =
+    prReviewCursor.get(repo.full_name) ??
+    new Date(Date.now() - INITIAL_LOOKBACK_MS).toISOString();
+  const tickStart = new Date().toISOString();
+
+  const prs = await octokit.pulls.list({
+    owner,
+    repo: name,
+    state: "open",
+    sort: "updated",
+    direction: "desc",
+    per_page: 100,
+  });
+
+  for (const pr of prs.data) {
+    if (!isAtOrAfterCursor(pr.updated_at, cursor)) break;
+    const assignees = logins(pr.assignees);
+    if (!assignees.includes(me)) continue;
+    const subject: NormalizedSubject = {
+      type: "pull_request",
+      number: pr.number,
+      state: "open",
+      assignees,
+      requestedReviewers: logins(pr.requested_reviewers),
+      title: pr.title ?? "",
+      body: pr.body ?? "",
+      headRef: pr.head?.ref,
+      headRepoFullName: pr.head?.repo?.full_name ?? undefined,
+      baseRef: pr.base?.ref,
+    };
+
+    try {
+      const reviews = await octokit.pulls.listReviews({
+        owner,
+        repo: name,
+        pull_number: pr.number,
+        per_page: 100,
+      });
+      for (const r of reviews.data) {
+        if (!isAtOrAfterCursor(r.submitted_at, cursor)) continue;
+        const body = r.body ?? "";
+        if (isAgentComment(body)) continue;
+        const fresh = await recordDelivery(`poll-pr-review-${r.id}`, "pull_request_review");
+        if (!fresh) continue;
+        const author = r.user?.login ?? "";
+        const followUpInput: DraftFollowUpInput = {
+          body,
+          authorLogin: author,
+          htmlUrl: r.html_url ?? null,
+          eventLabel: "review",
+          location: r.state ? `review: ${String(r.state).toLowerCase()}` : undefined,
+        };
+        await startDraft(repo, subject, author, r.html_url ?? null, followUpInput);
+      }
+
+      const inline = await octokit.pulls.listReviewComments({
+        owner,
+        repo: name,
+        pull_number: pr.number,
+        per_page: 100,
+      });
+      for (const c of inline.data) {
+        if (!isAtOrAfterCursor(c.created_at, cursor)) continue;
+        const body = c.body ?? "";
+        if (isAgentComment(body)) continue;
+        const fresh = await recordDelivery(
+          `poll-pr-review-comment-${c.id}`,
+          "pull_request_review_comment",
+        );
+        if (!fresh) continue;
+        const author = c.user?.login ?? "";
+        const followUpInput: DraftFollowUpInput = {
+          body,
+          authorLogin: author,
+          htmlUrl: c.html_url ?? null,
+          eventLabel: "inline review comment",
+          location: inlineLocation(c),
+        };
+        await startDraft(repo, subject, author, c.html_url ?? null, followUpInput);
+      }
+    } catch (err) {
+      logger.warn({ err, prNumber: pr.number }, "poll: failed to handle PR review activity");
+    }
+  }
+
+  prReviewCursor.set(repo.full_name, tickStart);
 }

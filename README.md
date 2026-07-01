@@ -14,8 +14,9 @@ See [SPEC.md](SPEC.md) for the full design and the decisions behind it.
    issue or PR you're assigned to. kotx runs a read-only **draft** pass (Codex
    inspects the repo) and produces a `TASK.md` brief + plan. You review it in the
    frontend and **start** it; only then does Codex implement, push the branch, and
-   post a summary comment. The brief reads differently on a first assignment vs. a
-   follow-up.
+   post a summary comment. First drafts use the issue/PR body and discussion;
+   follow-up drafts revise the reviewed `TASK.md` from the prior run using the
+   latest triggering comment or review as the new input.
 2. **Conflict** — a PR assigned to you becomes unmergeable. Codex resolves the
    conflicts automatically (no approval) and pushes the merge.
 3. **Review** — your review is requested on a PR (or such a PR gets new commits).

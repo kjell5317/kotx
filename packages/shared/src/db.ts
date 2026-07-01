@@ -76,6 +76,32 @@ export async function findActiveTask(
   return res.rows[0];
 }
 
+/** Most recent prior implement task for the same subject, used by follow-up drafts. */
+export async function findLatestPriorImplementTask(input: {
+  repoFullName: string;
+  subjectType: SubjectType;
+  subjectNumber: number;
+  excludeTaskId: number;
+}): Promise<Task | undefined> {
+  const res = await getPool().query<Task>(
+    `SELECT * FROM tasks
+     WHERE repo_full_name = $1
+       AND subject_type = $2
+       AND subject_number = $3
+       AND kind = 'implement'
+       AND id <> $4
+     ORDER BY updated_at DESC, id DESC
+     LIMIT 1`,
+    [
+      input.repoFullName,
+      input.subjectType,
+      input.subjectNumber,
+      input.excludeTaskId,
+    ],
+  );
+  return res.rows[0];
+}
+
 /**
  * Whether any task (in any state) exists for a subject. The poller uses this to
  * fire assignment/review triggers at most once per subject — without labels to
@@ -257,6 +283,17 @@ export async function setTaskPr(id: number, prNumber: number): Promise<void> {
     id,
     prNumber,
   ]);
+}
+
+export async function setTaskTrigger(
+  id: number,
+  triggeredBy: string,
+  triggerCommentUrl: string | null,
+): Promise<void> {
+  await getPool().query(
+    `UPDATE tasks SET triggered_by = $2, trigger_comment_url = $3 WHERE id = $1`,
+    [id, triggeredBy, triggerCommentUrl],
+  );
 }
 
 export async function setTaskPrAndState(

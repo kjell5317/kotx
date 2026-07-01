@@ -154,11 +154,11 @@ The agent therefore acts as **me**. No GitHub App, no installation tokens.
   pull_request_review_comment, push**.
 - **Polling** (`poll: true`): the app polls every `POLL_INTERVAL_SEC` for repos
   where I can't register a webhook. It diffs GitHub state against existing tasks
-  to find new assignments, review requests, conflicts, and follow-up comments —
-  **no labels or commands**. Without a label to clear, assignment/review triggers
-  fire at most once per subject (`hasAnyTask` guard); follow-ups arrive via the
-  comment cursor (de-duped by comment id); conflict checks self-limit (only fire
-  when the PR is dirty and has no active task).
+  to find new assignments, review requests, conflicts, and follow-up comments or
+  PR reviews — **no labels or commands**. Without a label to clear,
+  assignment/review triggers fire at most once per subject (`hasAnyTask` guard);
+  follow-ups arrive via cursors and `github_deliveries` de-dupe; conflict checks
+  self-limit (only fire when the PR is dirty and has no active task).
 
 ### 5.3 Triggers (no labels, no commands)
 All labels (`agent:*`) and `/agent` commands were **removed** in v3. Triggers are
@@ -195,10 +195,13 @@ by the **subject + kind/phase**, not how it was triggered. Each run pipes
 frontend reads (`TASK.md`, `REVIEW.md`) live in a per-task dir so they survive a
 draft refresh, the execute run, and human edits.
 
-- **draft** (read-only): inspect the repo + issue/PR/discussion → write
+- **draft** (read-only): inspect the repo + task input → write
   `/workspace/TASK.md` (goal · context · plan). Saved to the task dir; state →
-  `draft`. Never commits. First-assignment vs. follow-up tone via an `isFollowUp`
-  flag (a re-triggered draft is attempt > 1).
+  `draft`. Never commits. First-assignment drafts use the issue/PR body and
+  discussion. Follow-up drafts use the reviewed `TASK.md` from the current task
+  or latest prior implement task plus the latest triggering comment/review body;
+  they include the original issue/PR context only as an explicit fallback when
+  older jobs lack that durable brief or trigger body.
 - **implement/execute**: pipe the approved (possibly edited) `TASK.md` as the
   brief → merge the default branch in → Codex implements → commit + push the
   branch → comment the `AGENT_RESULT.md` summary. Issue branch is GitHub-style
@@ -230,7 +233,7 @@ comments are authored as me.
 tasks         one unit of work per (repo, subject); partial unique index
               enforces ≤1 active task per subject
 task_runs     one attempt per task (worktree path, container, outcome, logs)
-github_deliveries   webhook + poll-comment idempotency (delivery/comment ids)
+github_deliveries   webhook + poll follow-up idempotency (delivery/comment/review ids)
 ```
 
 `tasks.role` (`assignee` | `reviewer`) records my relationship to the subject and

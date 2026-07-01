@@ -1,9 +1,8 @@
 {{#if isFollowUp}}
 # Refine the task for {{subjectKind}} #{{subjectNumber}} (follow-up)
 
-New activity arrived on a {{subjectKind}} you're already assigned to. Read the
-latest discussion below and update the task brief so it reflects **what is being
-asked for now** — not just the original description.
+New activity arrived on a {{subjectKind}} you're already assigned to. Revise the
+previous reviewed task brief so it reflects **what is being asked for now**.
 {{else}}
 # Prepare a task brief for {{subjectKind}} #{{subjectNumber}}
 
@@ -13,6 +12,49 @@ brief and a concrete plan grounded in this repository.
 
 Repository: {{repoFullName}} (checked out read-only at /workspace, branch `{{branchName}}`)
 
+{{#if isFollowUp}}
+## Subject
+{{subjectKind}} #{{subjectNumber}}: {{title}}
+
+## Previous reviewed TASK.md
+{{#if previousTaskBrief}}
+{{previousTaskBrief}}
+{{else}}
+Missing: no durable reviewed `TASK.md` was found for the current or latest prior
+implement task.
+{{/if}}
+
+## Latest triggering input
+{{#if followUpInput}}
+From **{{followUpInput.authorLogin}}**{{#if followUpInput.eventLabel}} via {{followUpInput.eventLabel}}{{/if}}{{#if followUpInput.location}} · {{followUpInput.location}}{{/if}}{{#if followUpInput.htmlUrl}}:
+{{followUpInput.htmlUrl}}{{else}}:{{/if}}
+
+{{#if followUpInputHasBody}}
+{{followUpInput.body}}
+{{/if}}
+{{else}}
+Missing: this queued draft did not include the triggering comment or review body.
+{{/if}}
+
+{{#if needsFollowUpFallback}}
+## Fallback issue/PR context
+Use this original context only to recover from the missing primary input above.
+Do not replay the full historical discussion when the previous `TASK.md` and
+latest trigger are sufficient.
+
+### {{subjectKind}} description
+{{body}}
+
+{{#if comments.length}}
+### Discussion (chronological)
+{{#each comments}}
+- **{{this.author}}**{{#if this.location}} · {{this.location}}{{/if}}:
+{{this.body}}
+
+{{/each}}
+{{/if}}
+{{/if}}
+{{else}}
 ## {{subjectKind}} title
 {{title}}
 
@@ -27,6 +69,7 @@ Repository: {{repoFullName}} (checked out read-only at /workspace, branch `{{bra
 
 {{/each}}
 {{/if}}
+{{/if}}
 
 ## What to do
 
@@ -35,8 +78,9 @@ Repository: {{repoFullName}} (checked out read-only at /workspace, branch `{{bra
    read-only planning pass.
 2. Write a task brief to `/workspace/TASK.md` using the template below.
 {{#if isFollowUp}}
-3. Emphasize the delta: lead with what the latest comments/review request, then
-   restate the remaining goal. If earlier work already happened, account for it.
+3. Emphasize the delta from the previous reviewed brief: lead with what the
+   latest trigger requests, preserve still-relevant scope, and remove anything
+   that is no longer accurate.
 {{else}}
 3. Capture the goal precisely and propose a focused, reviewable plan.
 {{/if}}
