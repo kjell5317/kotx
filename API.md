@@ -33,9 +33,11 @@ curl -H "Authorization: Bearer $API_TOKEN" \
 | `POST /api/tasks/:id/comment` | **Branch 3** (`kind = review`): post non-empty `REVIEW.md` as a plain PR comment. Empty or whitespace-only review text is rejected. Only valid from `state = awaiting_approval` → `awaiting_external` |
 | `GET /api/tasks/:id/pr` | **Branch 1**: the proposed PR as JSON `{ title, body }`. `404` if there's no proposal |
 | `PUT /api/tasks/:id/pr` | edit the proposed PR title/description before approving. Only allowed while `kind = implement` and `state = awaiting_approval`. Body: JSON `{ "title"?: "…", "body"?: "…" }` (send either or both) |
+| `GET /api/tasks/:id/merge` | **Branch 1**: the pending merge proposal created from an approving PR review (`MERGE_APPROVAL.md`, markdown). `404` if there's no merge proposal |
+| `POST /api/tasks/:id/merge` | **Branch 1**: confirm the merge proposal. Merges the tracked PR using the repo's configured `merge_method` (`squash` by default), marks the task `done`, and clears its notification. `409` if the task has no tracked PR or GitHub says the PR is missing/not mergeable |
 | `GET /api/tasks/:id/prompt` | the exact prompt piped into Codex on the latest run (markdown). `404` until a run has started |
 | `GET /api/tasks/:id/log` | a bounded JSON page of the latest run's Codex transcript. Defaults to the newest 50 JSONL entries; `404` until a log exists |
-| `POST /api/tasks/:id/approve` | approve the proposal (see `proposes`). **Branch 3** (`kind = review`): submit an approving PR review using `REVIEW.md` as the body; if the trimmed review is empty, the approval has no body. **Branch 1** (`kind = implement`): merge the default branch into the pushed branch and open the proposed PR (returns `{ ok, prNumber, prUrl }`), then mark it `awaiting_external`. `409` if the branch conflicts with the default branch (re-run to merge). Only valid from `state = awaiting_approval` |
+| `POST /api/tasks/:id/approve` | approve the proposal (see `proposes`). **Branch 3** (`kind = review`): submit an approving PR review using `REVIEW.md` as the body; if the trimmed review is empty, the approval has no body. **Branch 1 PR opening** (`kind = implement`, no tracked PR): merge the default branch into the pushed branch and open the proposed PR (returns `{ ok, prNumber, prUrl }`), then mark it `awaiting_external`. **Branch 1 merge** (`kind = implement`, tracked PR): same as `POST …/merge`. Only valid from `state = awaiting_approval` |
 | `POST /api/tasks/:id/discard` | dismiss a task of any kind from the active list → `state = cancelled`, with `stateReason = "discarded from the API"`. Also signals cancel. `409` if already terminal |
 | `GET /api/containers` | live `docker ps` of the running codex runners |
 
@@ -179,6 +181,7 @@ curl -H "Authorization: Bearer $TOKEN" \
   "stateReason": null,             // reason for failed/cancelled, when set
   "branch": "31-add-metadata-index",
   "prNumber": null,                // set after a PR is opened from the pushed branch
+  "trackedPrNumber": null,         // PR this task is waiting on; for PR-subject tasks this is subjectNumber
   "triggeredBy": "octocat",
   "outcome": null,                 // last run outcome, once finished
   "attempt": 1,
@@ -188,9 +191,10 @@ curl -H "Authorization: Bearer $TOKEN" \
   "updatedAt": "2026-06-30T10:00:05.000Z",
   "githubUrl": "https://github.com/owner/repo/issues/31",
   "canStart": true,                // POST …/start is valid now
-  "canApprove": false,             // POST …/approve is valid now (PR review approval or PR proposal)
+  "canApprove": false,             // POST …/approve is valid now (review, PR opening, or merge)
+  "canMerge": false,               // POST …/merge is valid now
   "canComment": false,             // POST …/comment is valid now (review tasks only)
-  "proposes": null,                // what approve does: "review" | "pr" | null
+  "proposes": null,                // what approve does: "review" | "pr" | "merge" | null
   "canDiscard": true               // POST …/discard is valid now
 }
 ```
@@ -198,7 +202,9 @@ curl -H "Authorization: Bearer $TOKEN" \
 Use `status` for display and the `can*` flags to decide which buttons to show.
 When `canApprove` is true, `proposes` says what the approve button does: `"review"`
 submits an approving PR review with `REVIEW.md` as the body (fetch via
-`GET …/review`), `"pr"` opens the proposed PR (fetch via `GET …/pr`). When
+`GET …/review`), `"pr"` opens the proposed PR (fetch via `GET …/pr`), and
+`"merge"` merges the tracked PR (fetch the approval context via `GET …/merge`;
+`POST …/merge` is the explicit confirmation endpoint). When
 `canComment` is true, `POST …/comment` posts the same `REVIEW.md` as a plain PR
 comment instead of approving the PR; it is rejected if the saved review is empty
 or whitespace-only.
@@ -235,7 +241,10 @@ or whitespace-only.
   `running`, then comes back with `canApprove` and `proposes = "pr"`. Review the
   proposed PR via `GET …/pr` (optionally `PUT …/pr` to edit the title/body) →
   `POST …/approve` to open the PR. It then shows `in review` until that PR merges
-  (`done`) or closes (`cancelled`).
+  (`done`) or closes (`cancelled`). If the PR receives an approving review first,
+  the same task returns to `awaiting approval` with `proposes = "merge"`; fetch
+  `GET …/merge` to read the approval comment and `POST …/merge` (or
+  `POST …/approve`) to merge the PR and mark the task done.
 - **Branch 3 (review)**: a task appears with `kind=review`, `canApprove`, and
   `canComment` → `GET …/review` → either `POST …/approve` to submit an approving
   PR review or `POST …/comment` to post non-empty review text as a plain PR

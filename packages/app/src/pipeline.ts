@@ -1,3 +1,5 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   addRun,
   clearNotification,
@@ -5,6 +7,7 @@ import {
   createTaskWithRun,
   enqueueTask,
   findActiveTask,
+  findInReviewImplementTaskForPr,
   findTasksTrackingPr,
   findTasksWaitingOnPr,
   findOpenPrTask,
@@ -12,15 +15,19 @@ import {
   hasReviewTask,
   getOctokit,
   isAgentComment,
+  isUniqueViolation,
   loadEnv,
   logger,
+  notify,
   setTaskPrAndState,
   setTaskState,
   setTaskTrigger,
   splitRepo,
+  taskDirFor,
   taskNotifyTag,
   type DraftFollowUpInput,
   type JobPhase,
+  type PullRequestReviewInput,
   type RepoConfig,
   type SubjectType,
   type Task,
@@ -238,6 +245,89 @@ function prCloseReason(prNumber: number): string {
   return `PR #${prNumber} was closed without merging`;
 }
 
+function trackedPrNumber(task: Task): number | null {
+  return task.pr_number ??
+    (task.subject_type === "pull_request" ? task.subject_number : null);
+}
+
+function mergeApprovalArtifact(input: {
+  repoFullName: string;
+  prNumber: number;
+  review: PullRequestReviewInput;
+}): string {
+  const body = input.review.body.trim();
+  return [
+    `# Merge PR #${input.prNumber}`,
+    "",
+    `PR: https://github.com/${input.repoFullName}/pull/${input.prNumber}`,
+    `Approved by: @${input.review.authorLogin || "unknown"}`,
+    input.review.htmlUrl ? `Review: ${input.review.htmlUrl}` : null,
+    "",
+    "## Approval comment",
+    "",
+    body || "_No approval comment._",
+    "",
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
+}
+
+/** Move an in-review implement task back to human approval after PR approval. */
+export async function proposeMergeForApprovedReview(
+  repo: RepoConfig,
+  subject: NormalizedSubject,
+  review: PullRequestReviewInput,
+): Promise<IngestResult> {
+  if (subject.type !== "pull_request" || subject.state !== "open")
+    return { status: "ignored", reason: "not-open-pr" };
+  if (review.state !== "approved")
+    return { status: "ignored", reason: "review-not-approved" };
+  if (isAgentComment(review.body))
+    return { status: "ignored", reason: "agent-comment" };
+
+  const task = await findInReviewImplementTaskForPr(
+    repo.full_name,
+    subject.number,
+  );
+  if (!task) return { status: "ignored", reason: "no-in-review-task" };
+
+  const prNumber = trackedPrNumber(task);
+  if (!prNumber) return { status: "ignored", reason: "task-has-no-pr" };
+
+  const dir = taskDirFor(loadEnv().agentDataDir, task.id);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, "MERGE_APPROVAL.md"),
+    mergeApprovalArtifact({ repoFullName: repo.full_name, prNumber, review }),
+    "utf8",
+  );
+
+  try {
+    await setTaskTrigger(task.id, review.authorLogin, review.htmlUrl);
+    await setTaskState(task.id, "awaiting_approval");
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      logger.info(
+        { taskId: task.id, prNumber },
+        "merge proposal skipped because subject already has an active task",
+      );
+      return { status: "ignored", reason: "already-active-race" };
+    }
+    throw err;
+  }
+
+  await notify({
+    title: `PR #${prNumber} approved`,
+    message: "Confirm merge",
+    tag: taskNotifyTag(task.id),
+  }).catch(() => {});
+  logger.info(
+    { taskId: task.id, prNumber, reviewer: review.authorLogin },
+    "merge proposal created from approving review",
+  );
+  return { status: "handled", action: `merge-proposed:${task.id}` };
+}
+
 export async function markPrOpened(
   repo: RepoConfig,
   prNumber: number,
@@ -414,6 +504,15 @@ export async function ingest(n: Normalized): Promise<IngestResult> {
     if (n.targetLogin !== me && !subject.assignees.includes(me))
       return { status: "ignored", reason: "assignee-not-me" };
     return maybeResolveConflict(repo, subject, n.senderLogin);
+  }
+
+  if (
+    n.event === "pull_request_review" &&
+    n.pullRequestReview?.state === "approved"
+  ) {
+    if (!subject.assignees.includes(me))
+      return { status: "ignored", reason: "not-assigned-to-me" };
+    return proposeMergeForApprovedReview(repo, subject, n.pullRequestReview);
   }
 
   // Branch 1: a comment or review on an issue/PR I'm assigned to. A human

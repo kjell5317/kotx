@@ -417,6 +417,26 @@ export async function findOpenPrTask(
   return res.rows[0];
 }
 
+export async function findInReviewImplementTaskForPr(
+  repoFullName: string,
+  prNumber: number,
+): Promise<Task | undefined> {
+  const res = await getPool().query<Task>(
+    `SELECT * FROM tasks
+     WHERE repo_full_name = $1
+       AND kind = 'implement'
+       AND state = 'awaiting_external'
+       AND (
+         pr_number = $2
+         OR (subject_type = 'pull_request' AND subject_number = $2)
+       )
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [repoFullName, prNumber],
+  );
+  return res.rows[0];
+}
+
 export async function findTasksTrackingPr(
   repoFullName: string,
   prNumber: number,

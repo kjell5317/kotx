@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+export const pullRequestMergeMethodSchema = z.enum(["merge", "squash", "rebase"]);
+export type PullRequestMergeMethod = z.infer<typeof pullRequestMergeMethodSchema>;
+
 // ── Config: defaults.yml (SPEC §3.1) ────────────────────────────────────────
 export const defaultsSchema = z.object({
   concurrency: z.object({
@@ -52,6 +55,7 @@ export const repoConfigSchema = z.object({
   enabled: z.boolean(),
   default_branch: z.string().default("main"),
   assignee_login: z.string(),
+  merge_method: pullRequestMergeMethodSchema.default("squash"),
   // true = poll this repo (no webhook rights); false = rely on webhooks.
   // The poller diffs GitHub state against existing tasks to find new triggers
   // (assignments, review requests, conflicts) — no labels or commands involved.

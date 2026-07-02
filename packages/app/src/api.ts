@@ -16,6 +16,7 @@ import {
   listTasks,
   loadEnv,
   logger,
+  mergePullRequest,
   openPullRequest,
   postIssueComment,
   runDirFor,
@@ -70,7 +71,12 @@ function githubUrl(repo: string, subjectType: string, subjectNumber: number): st
 
 function taskDto(t: TaskListItem) {
   const inExternal = t.state === "awaiting_external";
-  const hasKnownPr = t.pr_number !== null || t.subject_type === "pull_request";
+  const trackedPr = trackedPrNumber(t);
+  const hasKnownPr = trackedPr !== null;
+  const mergeProposal =
+    t.kind === "implement" &&
+    t.state === "awaiting_approval" &&
+    trackedPr !== null;
   return {
     id: t.id,
     repo: t.repo_full_name,
@@ -88,6 +94,7 @@ function taskDto(t: TaskListItem) {
     stateReason: t.state_reason,
     branch: t.branch_name,
     prNumber: t.pr_number,
+    trackedPrNumber: trackedPr,
     triggeredBy: t.triggered_by,
     outcome: t.outcome,
     attempt: t.attempt,
@@ -101,6 +108,7 @@ function taskDto(t: TaskListItem) {
     canApprove:
       t.state === "awaiting_approval" &&
       (t.kind === "review" || t.kind === "implement"),
+    canMerge: mergeProposal,
     // review tasks can also post REVIEW.md as a plain PR comment instead.
     canComment: t.kind === "review" && t.state === "awaiting_approval",
     // what approving this task does, so the UI can label the button/proposal.
@@ -109,12 +117,21 @@ function taskDto(t: TaskListItem) {
         ? t.kind === "review"
           ? "review"
           : t.kind === "implement"
-            ? "pr"
+            ? mergeProposal
+              ? "merge"
+              : "pr"
             : null
         : null,
     // any non-terminal task can be dismissed (e.g. one stuck "in review")
     canDiscard: !TERMINAL_STATES.has(t.state),
   };
+}
+
+function trackedPrNumber(
+  task: Pick<Task, "pr_number" | "subject_type" | "subject_number">,
+): number | null {
+  return task.pr_number ??
+    (task.subject_type === "pull_request" ? task.subject_number : null);
 }
 
 async function readFileOrNull(path: string): Promise<string | null> {
@@ -160,6 +177,96 @@ async function requirePendingReview(
     return null;
   }
   return { task, review };
+}
+
+async function requirePendingMerge(
+  id: number,
+  reply: FastifyReply,
+  existingTask?: Task,
+): Promise<{ task: Task; prNumber: number } | null> {
+  const task = existingTask ?? (await getTask(id));
+  if (!task) {
+    reply.code(404).send({ error: "no such task" });
+    return null;
+  }
+  const prNumber = trackedPrNumber(task);
+  if (
+    task.kind !== "implement" ||
+    task.state !== "awaiting_approval" ||
+    prNumber === null
+  ) {
+    reply
+      .code(409)
+      .send({ error: `cannot merge from state ${task.state}` });
+    return null;
+  }
+  if ((await readTaskArtifact(id, "MERGE_APPROVAL.md")) === null) {
+    reply.code(409).send({ error: "no pending merge proposal" });
+    return null;
+  }
+  return { task, prNumber };
+}
+
+function isGithubMergeBlocked(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const status = (err as { status?: number }).status;
+  return status === 404 || status === 405 || status === 409 || status === 422;
+}
+
+function githubMergeErrorMessage(err: unknown): string {
+  if (typeof err === "object" && err !== null) {
+    const status = (err as { status?: number }).status;
+    if (status === 404) return "pull request was not found";
+    if (status === 405 || status === 409 || status === 422)
+      return "pull request is not mergeable";
+  }
+  return "pull request merge failed";
+}
+
+async function confirmMerge(
+  id: number,
+  reply: FastifyReply,
+  existingTask?: Task,
+) {
+  const pending = await requirePendingMerge(id, reply, existingTask);
+  if (!pending) return;
+  const repo = getEnabledRepo(pending.task.repo_full_name);
+  if (!repo) return reply.code(409).send({ error: "repository is not enabled" });
+  try {
+    const merged = await mergePullRequest(
+      getOctokit(),
+      pending.task.repo_full_name,
+      pending.prNumber,
+      repo.merge_method,
+    );
+    await setTaskState(id, "done", `PR #${pending.prNumber} merged`);
+    await clearNotification(taskNotifyTag(id));
+    logger.info(
+      {
+        taskId: id,
+        prNumber: pending.prNumber,
+        mergeMethod: repo.merge_method,
+        sha: merged.sha,
+      },
+      "pull request merged from API",
+    );
+    return {
+      ok: true,
+      prNumber: pending.prNumber,
+      mergeMethod: repo.merge_method,
+      sha: merged.sha,
+      message: merged.message,
+    };
+  } catch (err) {
+    if (isGithubMergeBlocked(err)) {
+      return reply.code(409).send({ error: githubMergeErrorMessage(err) });
+    }
+    logger.error(
+      { err, taskId: id, prNumber: pending.prNumber },
+      "pull request merge failed",
+    );
+    return reply.code(500).send({ error: "github merge failed" });
+  }
 }
 
 const DEFAULT_LOG_LIMIT = 50;
@@ -902,7 +1009,11 @@ export function registerApi(app: FastifyInstance): void {
     if (id === null) return;
     const task = await getTask(id);
     if (!task) return reply.code(404).send({ error: "no such task" });
-    if (task.kind !== "implement" || task.state !== "awaiting_approval")
+    if (
+      task.kind !== "implement" ||
+      task.state !== "awaiting_approval" ||
+      trackedPrNumber(task) !== null
+    )
       return reply.code(409).send({ error: `cannot edit PR proposal in state ${task.state}` });
     const proposal = parsePrProposal(req);
     if (!proposal || (proposal.title === undefined && proposal.body === undefined))
@@ -918,6 +1029,16 @@ export function registerApi(app: FastifyInstance): void {
     if (proposal.body !== undefined)
       await writeFile(join(dir, "PR_BODY.md"), proposal.body, "utf8");
     return { ok: true };
+  });
+
+  app.get("/api/tasks/:id/merge", async (req, reply) => {
+    if (!requireAuth(req, reply)) return;
+    const id = parseId(req, reply);
+    if (id === null) return;
+    const text = await readTaskArtifact(id, "MERGE_APPROVAL.md");
+    if (text === null)
+      return reply.code(404).send({ error: "no merge proposal" });
+    return reply.type("text/markdown").send(text);
   });
 
   // The exact prompt piped into Codex on the latest run (for inspection/debug).
@@ -991,10 +1112,19 @@ export function registerApi(app: FastifyInstance): void {
     return { ok: true };
   });
 
+  // Confirm a merge proposal created from an approving PR review.
+  app.post("/api/tasks/:id/merge", async (req, reply) => {
+    if (!requireAuth(req, reply)) return;
+    const id = parseId(req, reply);
+    if (id === null) return;
+    return confirmMerge(id, reply);
+  });
+
   // Approve a proposal. Branch 3 (review) → submit an approving PR review and
   // mark the task done (ownership then rests with the PR author).
   // Branch 1 (issue-origin implement) → bring the branch up to date with main
-  // and open the proposed PR, then wait on the external PR lifecycle.
+  // and open the proposed PR, then wait on the external PR lifecycle. Branch 1
+  // (already-tracking PR) → merge the approved PR.
   app.post("/api/tasks/:id/approve", async (req, reply) => {
     if (!requireAuth(req, reply)) return;
     const id = parseId(req, reply);
@@ -1020,6 +1150,10 @@ export function registerApi(app: FastifyInstance): void {
       await clearNotification(taskNotifyTag(id));
       logger.info({ taskId: id }, "PR review approved");
       return { ok: true };
+    }
+
+    if (task.kind === "implement" && trackedPrNumber(task) !== null) {
+      return confirmMerge(id, reply, task);
     }
 
     if (task.kind === "implement" && task.pr_number === null) {

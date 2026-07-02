@@ -4,7 +4,7 @@ A private coding agent that reacts to GitHub activity on issues/PRs that involve
 you, runs Codex in isolated Docker containers on your own Docker host, and acts
 **as you** (commits, pushes, comments). It is **headless** — it exposes a
 Bearer-protected JSON API for an external frontend to drive. It never opens PRs
-on its own, never merges, and never deploys.
+or merges without human confirmation, and never deploys.
 
 See [SPEC.md](SPEC.md) for the full design and the decisions behind it.
 
@@ -22,7 +22,9 @@ See [SPEC.md](SPEC.md) for the full design and the decisions behind it.
    conflict task done.
 3. **Review** — your review is requested on a PR (or such a PR gets new commits).
    Codex does a **read-only** review and writes `REVIEW.md`. You approve it in the
-   frontend; only then is it posted as a PR comment and marked done.
+   frontend; only then is it posted as a PR review/comment and marked done.
+   Separately, an approving review on a PR assigned to you creates a merge
+   confirmation for the existing in-review task.
 
 There are **no labels and no `/agent` commands** — triggers are plain GitHub
 webhook events (or polling for repos without webhook rights).
@@ -55,7 +57,9 @@ All `/api/*` routes require `Authorization: Bearer $API_TOKEN`.
 | `PUT /api/tasks/:id/task` | edit the brief before starting (draft state only) |
 | `POST /api/tasks/:id/start` | start the implementation (Branch 1, draft → queued) |
 | `GET /api/tasks/:id/review` | the `REVIEW.md` |
-| `POST /api/tasks/:id/approve` | post `REVIEW.md` to the PR (Branch 3) |
+| `GET /api/tasks/:id/merge` | the pending merge proposal, when a tracked PR was approved |
+| `POST /api/tasks/:id/approve` | approve the current proposal: submit review, open PR, or merge tracked PR |
+| `POST /api/tasks/:id/merge` | confirm a tracked PR merge proposal |
 | `POST /api/tasks/:id/discard` | dismiss or cancel a non-terminal task |
 | `GET /api/containers` | live `docker ps` of the running codex runners |
 
