@@ -9,6 +9,7 @@ import {
   displayStatus,
   enqueueTask,
   getEnabledRepo,
+  findNonTerminalTasksOnBranch,
   getLatestRun,
   getOctokit,
   getTask,
@@ -223,6 +224,26 @@ function githubMergeErrorMessage(err: unknown): string {
   return "pull request merge failed";
 }
 
+async function stopTasksOnMergedBranch(input: {
+  repoFullName: string;
+  branchName: string;
+  prNumber: number;
+  excludeTaskId: number;
+}): Promise<number> {
+  const tasks = await findNonTerminalTasksOnBranch({
+    repoFullName: input.repoFullName,
+    branchName: input.branchName,
+    excludeTaskId: input.excludeTaskId,
+  });
+  const reason = `PR #${input.prNumber} merged`;
+  for (const task of tasks) {
+    await setCancelFlag(task.id);
+    await setTaskState(task.id, "cancelled", reason);
+    await clearNotification(taskNotifyTag(task.id));
+  }
+  return tasks.length;
+}
+
 async function confirmMerge(
   id: number,
   reply: FastifyReply,
@@ -232,31 +253,14 @@ async function confirmMerge(
   if (!pending) return;
   const repo = getEnabledRepo(pending.task.repo_full_name);
   if (!repo) return reply.code(409).send({ error: "repository is not enabled" });
+  let merged: Awaited<ReturnType<typeof mergePullRequest>>;
   try {
-    const merged = await mergePullRequest(
+    merged = await mergePullRequest(
       getOctokit(),
       pending.task.repo_full_name,
       pending.prNumber,
       repo.merge_method,
     );
-    await setTaskState(id, "done", `PR #${pending.prNumber} merged`);
-    await clearNotification(taskNotifyTag(id));
-    logger.info(
-      {
-        taskId: id,
-        prNumber: pending.prNumber,
-        mergeMethod: repo.merge_method,
-        sha: merged.sha,
-      },
-      "pull request merged from API",
-    );
-    return {
-      ok: true,
-      prNumber: pending.prNumber,
-      mergeMethod: repo.merge_method,
-      sha: merged.sha,
-      message: merged.message,
-    };
   } catch (err) {
     if (isGithubMergeBlocked(err)) {
       return reply.code(409).send({ error: githubMergeErrorMessage(err) });
@@ -267,6 +271,35 @@ async function confirmMerge(
     );
     return reply.code(500).send({ error: "github merge failed" });
   }
+
+  const stoppedBranchTasks = pending.task.branch_name
+    ? await stopTasksOnMergedBranch({
+        repoFullName: pending.task.repo_full_name,
+        branchName: pending.task.branch_name,
+        prNumber: pending.prNumber,
+        excludeTaskId: id,
+      })
+    : 0;
+  await setTaskState(id, "done", `PR #${pending.prNumber} merged`);
+  await clearNotification(taskNotifyTag(id));
+  logger.info(
+    {
+      taskId: id,
+      prNumber: pending.prNumber,
+      branchName: pending.task.branch_name,
+      stoppedBranchTasks,
+      mergeMethod: repo.merge_method,
+      sha: merged.sha,
+    },
+    "pull request merged from API",
+  );
+  return {
+    ok: true,
+    prNumber: pending.prNumber,
+    mergeMethod: repo.merge_method,
+    sha: merged.sha,
+    message: merged.message,
+  };
 }
 
 const DEFAULT_LOG_LIMIT = 50;

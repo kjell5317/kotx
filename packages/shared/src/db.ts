@@ -346,6 +346,23 @@ export async function findTasksWaitingOnPr(repoFullName: string): Promise<Task[]
   return res.rows;
 }
 
+export async function findNonTerminalTasksOnBranch(input: {
+  repoFullName: string;
+  branchName: string;
+  excludeTaskId?: number;
+}): Promise<Task[]> {
+  const res = await getPool().query<Task>(
+    `SELECT * FROM tasks
+     WHERE repo_full_name = $1
+       AND branch_name = $2
+       AND ($3::bigint IS NULL OR id <> $3::bigint)
+       AND state::text NOT IN ${TERMINAL_STATE_SQL}
+     ORDER BY updated_at DESC, id DESC`,
+    [input.repoFullName, input.branchName, input.excludeTaskId ?? null],
+  );
+  return res.rows;
+}
+
 /** Whether a review task already exists for a PR (used to re-review new commits
  *  even after GitHub drops me from the PR's requested_reviewers). */
 export async function hasReviewTask(
