@@ -208,6 +208,41 @@ async function requirePendingMerge(
   return { task, prNumber };
 }
 
+async function readMergeProposal(
+  id: number,
+  reply: FastifyReply,
+): Promise<
+  | {
+      task: Task;
+      prNumber: number;
+      commentMarkdown: string;
+    }
+  | null
+> {
+  const task = await getTask(id);
+  if (!task) {
+    reply.code(404).send({ error: "no such task" });
+    return null;
+  }
+  const prNumber = trackedPrNumber(task);
+  if (
+    task.kind !== "implement" ||
+    task.state !== "awaiting_approval" ||
+    prNumber === null
+  ) {
+    reply
+      .code(409)
+      .send({ error: `cannot read merge proposal in state ${task.state}` });
+    return null;
+  }
+  const commentMarkdown = await readTaskArtifact(id, "MERGE_APPROVAL.md");
+  if (commentMarkdown === null) {
+    reply.code(404).send({ error: "no merge proposal" });
+    return null;
+  }
+  return { task, prNumber, commentMarkdown };
+}
+
 function isGithubMergeBlocked(err: unknown): boolean {
   if (typeof err !== "object" || err === null) return false;
   const status = (err as { status?: number }).status;
@@ -1072,6 +1107,20 @@ export function registerApi(app: FastifyInstance): void {
     if (text === null)
       return reply.code(404).send({ error: "no merge proposal" });
     return reply.type("text/markdown").send(text);
+  });
+
+  app.get("/api/tasks/:id/merge/context", async (req, reply) => {
+    if (!requireAuth(req, reply)) return;
+    const id = parseId(req, reply);
+    if (id === null) return;
+    const proposal = await readMergeProposal(id, reply);
+    if (!proposal) return;
+    return {
+      prNumber: proposal.prNumber,
+      approvedBy: proposal.task.triggered_by || null,
+      reviewUrl: proposal.task.trigger_comment_url,
+      commentMarkdown: proposal.commentMarkdown,
+    };
   });
 
   // The exact prompt piped into Codex on the latest run (for inspection/debug).
