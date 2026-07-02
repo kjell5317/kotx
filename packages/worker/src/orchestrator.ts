@@ -46,6 +46,7 @@ import {
   mergeDefaultBranch,
   mirrorPath,
   pushBranch,
+  remoteBranchExists,
   removeWorktree,
 } from "./git.js";
 import {
@@ -200,6 +201,9 @@ interface RunCtx {
   // a draft run is a follow-up (new activity) rather than a first assignment
   followUp: boolean;
   followUpInput?: DraftFollowUpInput;
+  // an issue execute whose branch was already pushed: build on top of it and
+  // fast-forward push instead of resetting to base and force-pushing
+  buildOnExistingBranch: boolean;
   // record why a run failed, surfaced in the finish notification
   setReason: (reason: string) => void;
 }
@@ -329,7 +333,11 @@ async function runImplement(ctx: RunCtx, merge: MergeResult): Promise<void> {
     });
   const guarded = await render(ctx);
   await finalizeWrite(ctx, guarded, merge, {
-    forceWithLease: ctx.task.subject_type === "issue",
+    // Fresh issue pushes create the branch; follow-ups build on the pushed tip
+    // and fast-forward. Force-with-lease only matters if we ever reset an
+    // existing branch to base — which buildOnExistingBranch now prevents.
+    forceWithLease:
+      ctx.task.subject_type === "issue" && !ctx.buildOnExistingBranch,
     successState: "awaiting_external",
     proposePr: opensPr,
     rerun: render,
@@ -671,6 +679,19 @@ export async function processJob(job: TaskJob): Promise<void> {
 
     const token = gitToken();
     await ensureMirrorFetched(task.repo_full_name, token);
+
+    // A follow-up execute on an issue branch that was already pushed builds on
+    // top of the existing attempt (start from its tip, merge latest main on
+    // top) so the later push fast-forwards. A fresh issue — or a retry that
+    // never pushed — has no remote branch, so it starts from base and the push
+    // creates the branch. PR-based work already starts from the PR head.
+    const buildOnExistingBranch =
+      !isPr &&
+      job.kind === "implement" &&
+      job.phase === "execute" &&
+      (await remoteBranchExists(task.repo_full_name, branch));
+    if (buildOnExistingBranch) baseSuffix = branch;
+
     await removeWorktree(task.repo_full_name, worktreePath);
     await addImplementWorktree(task.repo_full_name, worktreePath, branch, baseSuffix);
 
@@ -694,6 +715,7 @@ export async function processJob(job: TaskJob): Promise<void> {
         job.phase === "draft" &&
         (run.attempt > 1 || !!job.followUpInput),
       followUpInput: job.followUpInput,
+      buildOnExistingBranch,
       setReason: (reason) => {
         failureReason = reason;
       },

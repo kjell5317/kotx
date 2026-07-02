@@ -32,16 +32,19 @@ export async function ensureMirrorFetched(
 }
 
 /**
- * Create a fresh worktree on the agent branch off the base branch. Uses `-B`
+ * Create a fresh worktree on the agent branch, starting at `startRef`. Uses `-B`
  * (create-or-reset) so a leftover branch from a previous failed attempt doesn't
- * block the run, and prunes stale worktree admin entries first. An implement
- * attempt always starts fresh from base, so resetting the branch is correct.
+ * block the run, and prunes stale worktree admin entries first.
+ *
+ * `startRef` is the default branch for a fresh issue (start from base) or the
+ * agent branch itself for a follow-up (build on top of the already-pushed
+ * attempt so the later push fast-forwards instead of force-pushing).
  */
 export async function addImplementWorktree(
   repoFullName: string,
   worktreePath: string,
   branchName: string,
-  baseBranch: string,
+  startRef: string,
 ): Promise<void> {
   const mirror = mirrorPath(repoFullName);
   await run("git", ["-C", mirror, "worktree", "prune"]);
@@ -53,8 +56,20 @@ export async function addImplementWorktree(
     "-B",
     branchName,
     worktreePath,
-    `refs/remotes/origin/${baseBranch}`,
+    `refs/remotes/origin/${startRef}`,
   ]);
+}
+
+/** Whether the agent branch already exists on the remote (present in the mirror
+ *  after a fetch). Used to decide whether a follow-up builds on top of it. */
+export async function remoteBranchExists(
+  repoFullName: string,
+  branchName: string,
+): Promise<boolean> {
+  const mirror = mirrorPath(repoFullName);
+  return (
+    (await resolveRef(mirror, `refs/remotes/origin/${branchName}`)) !== null
+  );
 }
 
 /**
