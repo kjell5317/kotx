@@ -1,6 +1,7 @@
 import { Octokit } from "@octokit/rest";
 import { loadEnv } from "./config.js";
 import { logger } from "./logger.js";
+import type { PullRequestMergeMethod } from "./schemas.js";
 
 let octokit: Octokit | undefined;
 
@@ -121,6 +122,26 @@ export async function openPullRequest(
     }
   }
   return { number, htmlUrl: res.data.html_url };
+}
+
+/** Merge a pull request. Returns GitHub's merge commit SHA when available. */
+export async function mergePullRequest(
+  octokit: Octokit,
+  repoFullName: string,
+  pullNumber: number,
+  mergeMethod: PullRequestMergeMethod,
+): Promise<{ sha: string | null; message: string | null }> {
+  const [owner, repo] = splitRepo(repoFullName);
+  const res = await octokit.pulls.merge({
+    owner,
+    repo,
+    pull_number: pullNumber,
+    merge_method: mergeMethod,
+  });
+  return {
+    sha: res.data.sha ?? null,
+    message: res.data.message ?? null,
+  };
 }
 
 /**

@@ -119,6 +119,13 @@ export interface DraftFollowUpInput {
   location?: string;
 }
 
+export interface PullRequestReviewInput {
+  state: string;
+  body: string;
+  authorLogin: string;
+  htmlUrl: string | null;
+}
+
 export interface TaskJob {
   taskId: number;
   taskRunId: number;

@@ -18,6 +18,7 @@ import type { NormalizedSubject } from "./extract.js";
 import {
   maybeResolveConflict,
   prMergeState,
+  proposeMergeForApprovedReview,
   reconcileTrackedPr,
   reconcileWaitingPrs,
   startDraft,
@@ -370,12 +371,22 @@ async function pollPrReviewActivity(
         const fresh = await recordDelivery(`poll-pr-review-${r.id}`, "pull_request_review");
         if (!fresh) continue;
         const author = r.user?.login ?? "";
+        const reviewState = String(r.state ?? "").toLowerCase();
+        if (reviewState === "approved" && isAssignee) {
+          await proposeMergeForApprovedReview(repo, subject, {
+            state: reviewState,
+            body,
+            authorLogin: author,
+            htmlUrl: r.html_url ?? null,
+          });
+          continue;
+        }
         await handleItem(author, r.html_url ?? null, {
           body,
           authorLogin: author,
           htmlUrl: r.html_url ?? null,
           eventLabel: "review",
-          location: r.state ? `review: ${String(r.state).toLowerCase()}` : undefined,
+          location: r.state ? `review: ${reviewState}` : undefined,
         });
       }
 
