@@ -425,7 +425,8 @@ uses the configured `container.network` and Codex has no Docker access.
 503 if `API_TOKEN` is unset). `CORS_ORIGIN` enables the browser frontend.
 Endpoints: `GET /api/tasks?scope=active|all`, `GET /api/tasks/:id`,
 `POST /api/runs` (manual `implement`/`review`/`resolve` by GitHub issue/PR
-number; requires exactly one enabled repo because the body has no repo field),
+number, or create and assign a new GitHub issue when no number is supplied;
+optional `repo` accepts full names plus the `Social Ai` and `CSEE` aliases),
 `GET|PUT /api/tasks/:id/task`, `GET|PUT /api/tasks/:id/review`,
 `GET /api/tasks/:id/prompt` (the exact Codex prompt) and `…/log` (a JSON page
 of the latest run transcript, newest 200 JSONL entries by default; `limit`
