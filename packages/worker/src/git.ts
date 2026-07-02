@@ -39,6 +39,12 @@ export async function ensureMirrorFetched(
  * `startRef` is the default branch for a fresh issue (start from base) or the
  * agent branch itself for a follow-up (build on top of the already-pushed
  * attempt so the later push fast-forwards instead of force-pushing).
+ *
+ * Each run uses its own worktree path, so a follow-up gets a fresh path while the
+ * agent branch is still checked out in a prior run's worktree (best-effort cleanup
+ * can be lost to a crash or worker restart). `worktree add -B` refuses a branch
+ * checked out elsewhere, so we forcibly remove any worktree holding it first —
+ * `prune` alone only reaps worktrees whose directory is already gone.
  */
 export async function addImplementWorktree(
   repoFullName: string,
@@ -48,6 +54,18 @@ export async function addImplementWorktree(
 ): Promise<void> {
   const mirror = mirrorPath(repoFullName);
   await run("git", ["-C", mirror, "worktree", "prune"]);
+  for (const stale of await worktreesOnBranch(mirror, branchName)) {
+    await run("git", [
+      "-C",
+      mirror,
+      "worktree",
+      "remove",
+      "--force",
+      stale,
+    ]).catch(() => {
+      /* best-effort; the add below still fails loudly if the branch stays locked */
+    });
+  }
   await run("git", [
     "-C",
     mirror,
@@ -84,6 +102,32 @@ export function issueBranchName(issueNumber: number, title: string): string {
     .slice(0, 50)
     .replace(/-+$/, "");
   return slug ? `${issueNumber}-${slug}` : `${issueNumber}`;
+}
+
+/**
+ * Paths of worktrees currently checking out `refs/heads/<branchName>`, parsed from
+ * `git worktree list --porcelain` (each record is a blank-line-separated block with
+ * a `worktree <path>` line and, for a non-detached checkout, a `branch <ref>` line).
+ */
+async function worktreesOnBranch(
+  mirror: string,
+  branchName: string,
+): Promise<string[]> {
+  const { stdout } = await run("git", [
+    "-C",
+    mirror,
+    "worktree",
+    "list",
+    "--porcelain",
+  ]).catch(() => ({ stdout: "", stderr: "" }));
+  const target = `refs/heads/${branchName}`;
+  const paths: string[] = [];
+  let path: string | null = null;
+  for (const line of stdout.split("\n")) {
+    if (line.startsWith("worktree ")) path = line.slice("worktree ".length);
+    else if (line === `branch ${target}` && path) paths.push(path);
+  }
+  return paths;
 }
 
 async function resolveRef(mirror: string, ref: string): Promise<string | null> {
@@ -162,6 +206,10 @@ export async function mergeDefaultBranch(
       `user.email=${env.github.committerEmail}`,
       "merge",
       "--no-edit",
+      // Repo hooks run only inside the sandbox (runner.ts); on a follow-up the
+      // mirror already has pre-commit hooks installed, and a merge commit would
+      // otherwise fire them here on the host, where the `pre-commit` CLI is absent.
+      "--no-verify",
       `refs/remotes/origin/${defaultBranch}`,
     ]);
     return { conflicted: false, files: [], advanced: (await head()) !== before };
@@ -192,6 +240,13 @@ export async function mergeDefaultBranch(
  * For worker-owned issue branches, `forceWithLease` lets a rerun replace the
  * previous attempt while still refusing to overwrite a branch that moved after
  * this job fetched it.
+ *
+ * `--no-verify` skips any `pre-push` hook: the repo's hooks are meant to run only
+ * inside the sandboxed commit container (runner.ts), never on the worker host.
+ * pre-commit persists a `pre-push` hook into the shared mirror hooks dir when the
+ * repo's config wires one up, and it would otherwise fire here — invoking the
+ * `pre-commit` CLI, which isn't installed on the host — and fail the push (and
+ * run untrusted repo code next to the push credentials).
  */
 export async function pushBranch(
   repoFullName: string,
@@ -202,7 +257,7 @@ export async function pushBranch(
   const mirror = mirrorPath(repoFullName);
   const url = authedRemote(repoFullName, token);
   const remoteRef = `refs/heads/${branchName}`;
-  const args = ["-C", mirror, "push"];
+  const args = ["-C", mirror, "push", "--no-verify"];
 
   if (opts.forceWithLease) {
     const expected =
