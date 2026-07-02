@@ -1,5 +1,6 @@
 import {
   addRun,
+  clearNotification,
   closeSubjectTasks,
   createTaskWithRun,
   enqueueTask,
@@ -17,6 +18,7 @@ import {
   setTaskState,
   setTaskTrigger,
   splitRepo,
+  taskNotifyTag,
   type DraftFollowUpInput,
   type JobPhase,
   type RepoConfig,
@@ -196,11 +198,20 @@ export async function maybeResolveConflict(
 }
 
 /**
- * GitHub computes mergeability asynchronously, so `mergeable` is often null right
- * after an event. Poll pulls.get a few times until it settles. Conflicts surface
- * as mergeable=false / mergeable_state="dirty".
+ * A PR's mergeability. GitHub computes it asynchronously, so `mergeable` is often
+ * null right after an event; poll pulls.get a few times until it settles.
+ *   - "dirty":   conflicts with the base branch (needs resolve_conflict)
+ *   - "clean":   mergeable, closed, or a GitHub draft — nothing to resolve
+ *   - "unknown": GitHub hasn't computed it yet within this call; the caller
+ *                should retry on the next poll/event rather than assume "clean"
+ * The tri-state matters: callers must NOT treat "unknown" as "clean", or they'll
+ * take slot-stealing actions (e.g. starting a draft) before a pending conflict is
+ * detected — which then blocks the resolve on later ticks.
  */
-async function isConflicting(repo: RepoConfig, prNumber: number): Promise<boolean> {
+export async function prMergeState(
+  repo: RepoConfig,
+  prNumber: number,
+): Promise<"dirty" | "clean" | "unknown"> {
   const [owner, name] = splitRepo(repo.full_name);
   const octokit = getOctokit();
   for (let i = 0; i < 5; i++) {
@@ -209,12 +220,18 @@ async function isConflicting(repo: RepoConfig, prNumber: number): Promise<boolea
       repo: name,
       pull_number: prNumber,
     });
-    if (data.state !== "open" || data.draft) return false;
+    if (data.state !== "open" || data.draft) return "clean";
     if (data.mergeable !== null)
-      return data.mergeable === false && data.mergeable_state === "dirty";
+      return data.mergeable === false && data.mergeable_state === "dirty"
+        ? "dirty"
+        : "clean";
     await new Promise((r) => setTimeout(r, 2000));
   }
-  return false; // never settled — treat as not-conflicting (re-checked on next event)
+  return "unknown"; // never settled — re-checked on the next poll/event
+}
+
+async function isConflicting(repo: RepoConfig, prNumber: number): Promise<boolean> {
+  return (await prMergeState(repo, prNumber)) === "dirty";
 }
 
 function prCloseReason(prNumber: number): string {
@@ -253,6 +270,10 @@ export async function markPrClosed(
       merged ? "done" : "cancelled",
       merged ? null : prCloseReason(prNumber),
     );
+    // The PR is gone — any pending prompt for this task (e.g. "Comment review")
+    // is stale, so dismiss it. Covers closeSubjectTasks' set too: its subject=PR
+    // rows are a subset of the tasks found here.
+    await clearNotification(taskNotifyTag(task.id));
     updated++;
   }
 

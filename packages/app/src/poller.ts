@@ -5,6 +5,7 @@ import {
   hasReviewTask,
   isAgentComment,
   findTasksTrackingAnyPr,
+  findTasksTrackingPr,
   loadRepos,
   logger,
   recordDelivery,
@@ -16,6 +17,7 @@ import type { Octokit } from "@octokit/rest";
 import type { NormalizedSubject } from "./extract.js";
 import {
   maybeResolveConflict,
+  prMergeState,
   reconcileTrackedPr,
   reconcileWaitingPrs,
   startDraft,
@@ -192,9 +194,20 @@ async function pollPulls(
         headSha !== reviewTask.reviewed_head_sha;
       if (!seen || advanced) await startReview(repo, subject, me);
     } else if (subject.assignees.includes(me)) {
-      // conflict check is self-limiting (only fires when dirty + no active task)
-      await maybeResolveConflict(repo, subject, me);
-      if (!seen) await startDraft(repo, subject, me, null);
+      // Resolve conflicts vs. draft an implementation are mutually exclusive, and
+      // both want the PR's single active slot. Decide on *settled* mergeability so
+      // a not-yet-computed "unknown" doesn't let a draft steal the slot before a
+      // pending conflict is detected (which would then block the resolve).
+      const merge = await prMergeState(repo, pr.number);
+      if (merge === "dirty") {
+        await maybeResolveConflict(repo, subject, me);
+      } else if (merge === "clean" && !seen) {
+        // Don't re-draft a PR the agent itself opened (tracked via pr_number);
+        // that assignment is the agent's own, not a request to implement.
+        const tracked = await findTasksTrackingPr(repo.full_name, pr.number);
+        if (tracked.length === 0) await startDraft(repo, subject, me, null);
+      }
+      // "unknown": mergeability still computing — do nothing this tick.
     }
   }
 }

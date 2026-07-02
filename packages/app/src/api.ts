@@ -5,6 +5,7 @@ import cors from "@fastify/cors";
 import {
   addRun,
   approvePullRequestReview,
+  clearNotification,
   displayStatus,
   enqueueTask,
   getEnabledRepo,
@@ -23,6 +24,7 @@ import {
   setTaskState,
   splitRepo,
   taskDirFor,
+  taskNotifyTag,
   TERMINAL_STATES,
   updateBranchFromBase,
   type RepoConfig,
@@ -949,6 +951,8 @@ export function registerApi(app: FastifyInstance): void {
     const run = await addRun(id, loadEnv().agentDataDir);
     await setTaskState(id, "queued");
     await enqueueRun(task, run.id, "execute");
+    // The "Start implementation" prompt is done with — dismiss its notification.
+    await clearNotification(taskNotifyTag(id));
     logger.info({ taskId: id }, "task started from API");
     return { ok: true };
   });
@@ -969,6 +973,7 @@ export function registerApi(app: FastifyInstance): void {
       pending.review,
     );
     await setTaskState(id, "awaiting_external");
+    await clearNotification(taskNotifyTag(id));
     logger.info({ taskId: id }, "review posted as comment");
     return { ok: true };
   });
@@ -995,6 +1000,7 @@ export function registerApi(app: FastifyInstance): void {
         pending.review,
       );
       await setTaskState(id, "awaiting_external");
+      await clearNotification(taskNotifyTag(id));
       logger.info({ taskId: id }, "PR review approved");
       return { ok: true };
     }
@@ -1030,6 +1036,8 @@ export function registerApi(app: FastifyInstance): void {
         assignees: [repo.assignee_login],
       });
       await setTaskPrAndState(id, pr.number, "awaiting_external");
+      // The PR is open — the "Open PR" notification is stale, dismiss it.
+      await clearNotification(taskNotifyTag(id));
       logger.info({ taskId: id, prNumber: pr.number }, "PR proposal approved and opened");
       return { ok: true, prNumber: pr.number, prUrl: pr.htmlUrl };
     }
@@ -1050,6 +1058,7 @@ export function registerApi(app: FastifyInstance): void {
       return reply.code(409).send({ error: `task already ${task.state}` });
     await setCancelFlag(id);
     await setTaskState(id, "cancelled", "discarded from the API");
+    await clearNotification(taskNotifyTag(id));
     logger.info({ taskId: id }, "task discarded from API");
     return { ok: true };
   });

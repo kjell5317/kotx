@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   acquireRepoSlot,
   clearCancelFlag,
+  clearNotification,
   enqueueTask,
   finishRun,
   findLatestPriorImplementTask,
@@ -17,12 +18,14 @@ import {
   logger,
   markRunStarted,
   maxWorkersForRepo,
+  notify,
   releaseRepoSlot,
   runDirFor,
   setReviewedHeadSha,
   setTaskBranch,
   setTaskState,
   taskDirFor,
+  taskNotifyTag,
   TERMINAL_STATES,
   type DraftFollowUpInput,
   type RunOutcome,
@@ -49,7 +52,6 @@ import {
   postSummary,
   type SubjectDetails,
 } from "./githubOutputs.js";
-import { notify } from "./notify.js";
 import {
   classifyOutcome,
   deleteArtifacts,
@@ -72,11 +74,13 @@ function subjectKindWord(task: Task): string {
   return task.subject_type === "pull_request" ? "pull request" : "issue";
 }
 
-/** Frontend URL opened when tapping a Home Assistant notification. Deep-links
- * to the run's modal via the frontend's `#run/<id>` hash route. */
-function notifyUrl(runId: number): string | undefined {
+/** Frontend URL opened when tapping a Home Assistant notification. Deep-links to
+ * the task's modal via the frontend's `#run/<id>` hash route. The id is the TASK
+ * id, not the run id: the API is task-keyed (`/api/tasks/:id/...`) and has no
+ * per-run endpoint, so the frontend can only resolve a task id here. */
+function notifyUrl(taskId: number): string | undefined {
   const base = loadEnv().corsOrigin;
-  return base ? `${base.replace(/\/$/, "")}/#run/${runId}` : undefined;
+  return base ? `${base.replace(/\/$/, "")}/#run/${taskId}` : undefined;
 }
 
 const TITLE_MAX = 60;
@@ -600,22 +604,26 @@ export async function processJob(job: TaskJob): Promise<void> {
     if (started) {
       const fresh = await getTask(task.id).catch(() => undefined);
       const state = fresh?.state ?? "failed";
-      // Only notify when I have to do something (a pending action) or when the
-      // run failed. In-flight, pushed, cancelled and done states are silent.
-      const isFailed = state === "failed";
       const action = pendingAction(state, job.kind);
-      if (isFailed || action) {
-        const message = isFailed
-          ? failureReason
-            ? `Failed — ${failureReason}`
-            : "Failed"
-          : (action as string);
+      const tag = taskNotifyTag(task.id);
+      if (state === "failed") {
+        // Replace on fail: swap any pending prompt for the failure (same tag).
         await notify({
           title: notificationTitle(task),
-          message,
-          tag: `kotx-task-${task.id}`,
-          url: notifyUrl(run.id),
+          message: failureReason ? `Failed — ${failureReason}` : "Failed",
+          tag,
+          url: notifyUrl(task.id),
         }).catch(() => {});
+      } else if (action) {
+        await notify({
+          title: notificationTitle(task),
+          message: action,
+          tag,
+          url: notifyUrl(task.id),
+        }).catch(() => {});
+      } else {
+        // Nothing pending (cancelled / done / pushed) → dismiss any stale prompt.
+        await clearNotification(tag).catch(() => {});
       }
     }
     await releaseRepoSlot(task.repo_full_name, slot, holderId).catch(() => {});
