@@ -22,7 +22,7 @@ curl -H "Authorization: Bearer $API_TOKEN" \
 | Method & path | Returns / does |
 | --- | --- |
 | `GET /healthz` | `{ ok: true }` — unauthenticated liveness check |
-| `POST /api/runs` | manually enqueue an `implement`, `review`, or `resolve` run by GitHub issue/PR number. Body: `{ "type": "implement" \| "review" \| "resolve", "number": 123, "repo"?: "owner/name" }`. `repo` is optional with one enabled repo, required with several. Returns `202` with `{ status: "enqueued", taskId }` |
+| `POST /api/runs` | manually start work. With `{ "type": "implement" \| "review" \| "resolve", "number": 123, "repo"?: "owner/name" }`, enqueue an existing GitHub issue/PR. With `{ "repo"?: "owner/name", "title": "...", "body"?: "..." }`, create a new issue, assign it to the repo's configured assignee, and let the normal assignment path draft it. `repo` accepts full names plus the aliases `Social Ai` and `CSEE` |
 | `GET /api/tasks?scope=active\|all` | array of tasks where I'm assignee or reviewer. `active` (default) = non-terminal only; `all` = everything |
 | `GET /api/tasks/:id` | one task object |
 | `GET /api/tasks/:id/task` | the `TASK.md` brief (markdown). `404` if not generated yet |
@@ -61,16 +61,17 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" \
 
 ## Manual runs
 
-`POST /api/runs` lets a client explicitly enqueue work by GitHub number, without
-requiring the issue to be assigned to you or the PR to request your review. The
-server still checks that the requested action applies:
+`POST /api/runs` supports two modes.
+
+When `number` is present, it explicitly enqueues work by GitHub issue/PR number,
+without requiring the issue to be assigned to you or the PR to request your
+review. In this mode, `type` is required and the server still checks that the
+requested action applies:
 
 - `implement` accepts an open issue or open PR and creates the normal draft task.
 - `review` accepts only an open PR and creates or refreshes a review task.
 - `resolve` accepts only an open PR that is currently conflicting; mergeable PRs
   return `409`.
-
-The request body accepts `type`, `number`, and an optional `repo`:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $TOKEN" \
@@ -79,13 +80,44 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
   "https://agent.example.com/api/runs"
 ```
 
+When `number` is omitted, the endpoint creates a new GitHub issue in the
+selected repository and assigns it to that repo's configured `assignee_login`.
+It returns `201` with the created issue details and does not enqueue a task
+directly; the normal assignment webhook or poller path creates the draft task.
+In this mode, `title` is required because GitHub requires one, and `body` is
+optional.
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{"repo":"Social Ai","title":"Add import progress","body":"Show progress while CSV imports run."}' \
+  "https://agent.example.com/api/runs"
+```
+
+Successful issue creation returns:
+
+```json
+{
+  "status": "created",
+  "repo": "TUM-Social-AI/AflaConnect",
+  "issueNumber": 42,
+  "issueUrl": "https://github.com/TUM-Social-AI/AflaConnect/issues/42",
+  "assignee": "your-login"
+}
+```
+
 `repo` is optional when exactly one repo is enabled in `config/repos.yml` (it's
 inferred). When more than one repo is enabled, `repo` is **required** — omitting
 it returns `409` with the list of enabled repos. A `repo` that isn't in the
-enabled allowlist returns `409`. With zero enabled repos it returns `409`.
-Missing GitHub numbers return `404`; closed subjects, plain issues for
-`review`/`resolve`, mergeable PRs for `resolve`, and active-task conflicts
-return `409` with the pipeline `reason`.
+enabled allowlist returns `409`. Full repo names continue to work, with simple
+whitespace and trailing slashes normalized. The friendly aliases `Social Ai` and
+`CSEE` resolve to `TUM-Social-AI/AflaConnect` and
+`askLio/CSEE-strategic-negotiation-agent` before allowlist validation.
+
+With zero enabled repos it returns `409`. Missing GitHub numbers return `404`;
+closed subjects, plain issues for `review`/`resolve`, mergeable PRs for
+`resolve`, and active-task conflicts return `409` with the pipeline `reason`.
+GitHub create, assignment, and lookup failures return `500`.
 
 ## Log pagination
 

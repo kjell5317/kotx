@@ -402,12 +402,23 @@ function parseSingleInteger(value: unknown, name: string): number | string {
 
 type ManualRunType = "implement" | "review" | "resolve";
 
-interface ManualRunRequest {
+interface ExistingManualRunRequest {
+  mode: "existing";
   type: ManualRunType;
   number: number;
   // optional "owner/name" — required only when more than one repo is enabled.
   repo?: string;
 }
+
+interface CreateIssueManualRunRequest {
+  mode: "create_issue";
+  title: string;
+  body?: string;
+  // optional "owner/name" or friendly alias — required only when more than one repo is enabled.
+  repo?: string;
+}
+
+type ManualRunRequest = ExistingManualRunRequest | CreateIssueManualRunRequest;
 
 function parseManualRunRequest(
   req: FastifyRequest,
@@ -420,20 +431,52 @@ function parseManualRunRequest(
   }
 
   const unexpected = Object.keys(parsed).filter(
-    (key) => key !== "type" && key !== "number" && key !== "repo",
+    (key) =>
+      key !== "type" &&
+      key !== "number" &&
+      key !== "repo" &&
+      key !== "title" &&
+      key !== "body",
   );
   if (unexpected.length > 0) {
     reply.code(400).send({ error: `unexpected field: ${unexpected[0]}` });
     return null;
   }
 
-  const { type, number, repo } = parsed;
-  if (type !== "implement" && type !== "review" && type !== "resolve") {
+  const { type, number, repo, title, body } = parsed;
+  if (
+    type !== undefined &&
+    type !== "implement" &&
+    type !== "review" &&
+    type !== "resolve"
+  ) {
     reply
       .code(400)
       .send({ error: 'type must be "implement", "review", or "resolve"' });
     return null;
   }
+  if (repo !== undefined && (typeof repo !== "string" || repo.trim() === "")) {
+    reply.code(400).send({ error: 'repo must be a non-empty "owner/name" string' });
+    return null;
+  }
+
+  if (number === undefined) {
+    if (typeof title !== "string" || title.trim() === "") {
+      reply.code(400).send({ error: "title must be a non-empty string" });
+      return null;
+    }
+    if (body !== undefined && typeof body !== "string") {
+      reply.code(400).send({ error: "body must be a string" });
+      return null;
+    }
+    return {
+      mode: "create_issue",
+      title: title.trim(),
+      ...(body === undefined ? {} : { body }),
+      ...(repo === undefined ? {} : { repo }),
+    };
+  }
+
   if (
     typeof number !== "number" ||
     !Number.isSafeInteger(number) ||
@@ -442,11 +485,13 @@ function parseManualRunRequest(
     reply.code(400).send({ error: "number must be a positive integer" });
     return null;
   }
-  if (repo !== undefined && (typeof repo !== "string" || repo.trim() === "")) {
-    reply.code(400).send({ error: 'repo must be a non-empty "owner/name" string' });
+  if (type === undefined) {
+    reply
+      .code(400)
+      .send({ error: 'type must be "implement", "review", or "resolve"' });
     return null;
   }
-  return { type, number, ...(repo === undefined ? {} : { repo }) };
+  return { mode: "existing", type, number, ...(repo === undefined ? {} : { repo }) };
 }
 
 function parseJsonObjectBody(body: unknown): Record<string, unknown> | string {
@@ -472,6 +517,22 @@ function parseJsonObjectBody(body: unknown): Record<string, unknown> | string {
   return obj as Record<string, unknown>;
 }
 
+const MANUAL_RUN_REPO_ALIASES = new Map<string, string>([
+  ["social ai", "TUM-Social-AI/AflaConnect"],
+  ["csee", "askLio/CSEE-strategic-negotiation-agent"],
+]);
+
+function normalizeManualRunRepoInput(requested: string): string {
+  const trimmed = requested.trim().replace(/\/+$/g, "");
+  const aliasKey = trimmed.replace(/\s+/g, " ").toLowerCase();
+  const alias = MANUAL_RUN_REPO_ALIASES.get(aliasKey);
+  if (alias) return alias;
+
+  const parts = trimmed.split("/");
+  if (parts.length !== 2) return trimmed;
+  return `${parts[0]!.trim()}/${parts[1]!.trim()}`;
+}
+
 function getManualRunRepo(
   reply: FastifyReply,
   requested?: string,
@@ -484,7 +545,8 @@ function getManualRunRepo(
 
   // Explicit repo: must be one of the enabled allowlist entries.
   if (requested !== undefined) {
-    const repo = getEnabledRepo(requested);
+    const normalized = normalizeManualRunRepoInput(requested);
+    const repo = getEnabledRepo(normalized);
     if (!repo) {
       reply.code(409).send({
         error: `repo "${requested}" is not an enabled repository`,
@@ -599,6 +661,35 @@ async function fetchGithubSubject(
   }
 }
 
+async function createIssue(
+  repo: RepoConfig,
+  input: CreateIssueManualRunRequest,
+): Promise<{ number: number; htmlUrl: string }> {
+  const [owner, name] = splitRepo(repo.full_name);
+  const octokit = getOctokit();
+  const { data: issue } = await octokit.issues.create({
+    owner,
+    repo: name,
+    title: input.title,
+    ...(input.body === undefined ? {} : { body: input.body }),
+  });
+  return { number: issue.number, htmlUrl: issue.html_url };
+}
+
+async function assignIssue(
+  repo: RepoConfig,
+  issueNumber: number,
+): Promise<void> {
+  const [owner, name] = splitRepo(repo.full_name);
+  const octokit = getOctokit();
+  await octokit.issues.addAssignees({
+    owner,
+    repo: name,
+    issue_number: issueNumber,
+    assignees: [repo.assignee_login],
+  });
+}
+
 function ignoredStatus(reason: string): number {
   return reason === "repo-not-enabled" ? 404 : 409;
 }
@@ -622,13 +713,48 @@ export function registerApi(app: FastifyInstance): void {
   app.register(cors, { origin: origin ?? false, methods: ["GET", "POST", "PUT"] });
 
   // Manually enqueue a run for the configured repo, bypassing role gates while
-  // still requiring the requested action to fit the GitHub subject.
+  // still requiring the requested action to fit the GitHub subject. Without a
+  // number, create and assign an issue so the normal assignment path drafts it.
   app.post("/api/runs", async (req, reply) => {
     if (!requireAuth(req, reply)) return;
     const input = parseManualRunRequest(req, reply);
     if (!input) return;
     const repo = getManualRunRepo(reply, input.repo);
     if (!repo) return;
+
+    if (input.mode === "create_issue") {
+      let issue: { number: number; htmlUrl: string };
+      try {
+        issue = await createIssue(repo, input);
+      } catch (err) {
+        logger.error(
+          { err, repo: repo.full_name },
+          "manual run issue create failed",
+        );
+        return reply.code(500).send({ error: "github issue create failed" });
+      }
+      try {
+        await assignIssue(repo, issue.number);
+      } catch (err) {
+        logger.error(
+          {
+            err,
+            repo: repo.full_name,
+            issueNumber: issue.number,
+            assignee: repo.assignee_login,
+          },
+          "manual run issue assignment failed",
+        );
+        return reply.code(500).send({ error: "github issue assignment failed" });
+      }
+      return reply.code(201).send({
+        status: "created",
+        repo: repo.full_name,
+        issueNumber: issue.number,
+        issueUrl: issue.htmlUrl,
+        assignee: repo.assignee_login,
+      });
+    }
 
     let subject: NormalizedSubject | null;
     try {
