@@ -22,8 +22,9 @@ Triggers are plain GitHub events (or polling) keyed to your role on the subject
    and `POST …/approve`, which merges the default branch into the pushed branch
    and opens the PR. The task then waits for review. When that PR receives an
    approving review, the same task returns to `awaiting_approval` with the
-   approval comment saved as `MERGE_APPROVAL.md`; confirming the merge merges the
-   PR on GitHub and marks the task done.
+   approval comment saved as `MERGE_APPROVAL.md`; the approver and review URL are
+   exposed by the merge proposal API from task trigger metadata. Confirming the
+   merge merges the PR on GitHub and marks the task done.
 2. **Conflict (Branch 2)** — a PR assigned to you is unmergeable (`mergeable_state
    = dirty`), detected on `pull_request` synchronize/open or a `push` to the
    default branch. Codex resolves the in-progress merge automatically (no
@@ -188,8 +189,9 @@ the three role-aware workflows in §0, driven by webhook events:
 - `pull_request` opened/reopened from a pushed issue branch → record the PR and
   show the task as in review.
 - `pull_request_review` approved on an assigned PR → find the existing
-  `awaiting_external` implement task tracking that PR, save the approval context
-  to `MERGE_APPROVAL.md`, update the trigger metadata, and move it back to
+  `awaiting_external` implement task tracking that PR, save the approval comment
+  to `MERGE_APPROVAL.md`, update the trigger metadata with the reviewer and review
+  URL, and move it back to
   `awaiting_approval` for merge confirmation. If no matching in-review implement
   task exists, ignore the approval.
 - `pull_request` closed → close tracked open tasks as `done` when merged or
@@ -228,9 +230,11 @@ draft refresh, the execute run, and human edits.
   work moves to `awaiting_external` as "waiting on PR" until a PR is opened from
   that branch to the default branch, then "in review" until merge/close.
 - **merge proposal**: an approving PR review on an assigned PR does not refresh a
-  draft. The app saves the reviewer, URL, and approval body as
-  `MERGE_APPROVAL.md` in the tracked implement task and moves that task from
-  `awaiting_external` to `awaiting_approval`. Confirmation merges the tracked PR
+  draft. The app saves the approval body as `MERGE_APPROVAL.md` in the tracked
+  implement task, stores the reviewer and review URL in the task trigger
+  metadata, and moves that task from `awaiting_external` to `awaiting_approval`.
+  The merge proposal API returns the markdown approval comment together with the
+  structured approver identity and review URL. Confirmation merges the tracked PR
   with the repo's configured `merge_method` (`squash` by default) and marks the
   task `done`; GitHub not-mergeable/conflict responses are surfaced as `409`.
 - **resolve_conflict**: merge the default branch (leaving conflicts), Codex

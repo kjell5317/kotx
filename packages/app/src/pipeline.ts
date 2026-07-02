@@ -251,25 +251,10 @@ function trackedPrNumber(task: Task): number | null {
 }
 
 function mergeApprovalArtifact(input: {
-  repoFullName: string;
-  prNumber: number;
   review: PullRequestReviewInput;
 }): string {
   const body = input.review.body.trim();
-  return [
-    `# Merge PR #${input.prNumber}`,
-    "",
-    `PR: https://github.com/${input.repoFullName}/pull/${input.prNumber}`,
-    `Approved by: @${input.review.authorLogin || "unknown"}`,
-    input.review.htmlUrl ? `Review: ${input.review.htmlUrl}` : null,
-    "",
-    "## Approval comment",
-    "",
-    body || "_No approval comment._",
-    "",
-  ]
-    .filter((line): line is string => line !== null)
-    .join("\n");
+  return `${body || "_No approval comment provided._"}\n`;
 }
 
 /** Move an in-review implement task back to human approval after PR approval. */
@@ -298,7 +283,7 @@ export async function proposeMergeForApprovedReview(
   await mkdir(dir, { recursive: true });
   await writeFile(
     join(dir, "MERGE_APPROVAL.md"),
-    mergeApprovalArtifact({ repoFullName: repo.full_name, prNumber, review }),
+    mergeApprovalArtifact({ review }),
     "utf8",
   );
 

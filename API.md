@@ -9,8 +9,9 @@ workflows (see [SPEC.md](SPEC.md) §0). Served by the `app` service.
 - **Auth**: every `/api/*` request needs `Authorization: Bearer $API_TOKEN`.
   Missing/blank token → `401`; if the server has no `API_TOKEN` set → `503`.
 - **CORS**: set `CORS_ORIGIN` to your frontend's origin to allow browser calls.
-- **Content types**: list/detail and `…/log` endpoints return JSON; the
-  `…/task` and `…/review` endpoints return `text/markdown`.
+- **Content types**: list/detail, `…/merge/context`, and `…/log` endpoints
+  return JSON; the `…/task`, `…/review`, and `…/merge` endpoints return
+  `text/markdown`.
 
 ```bash
 curl -H "Authorization: Bearer $API_TOKEN" \
@@ -33,7 +34,8 @@ curl -H "Authorization: Bearer $API_TOKEN" \
 | `POST /api/tasks/:id/comment` | **Branch 3** (`kind = review`): post non-empty `REVIEW.md` as a plain PR comment. Empty or whitespace-only review text is rejected. Only valid from `state = awaiting_approval` → `awaiting_external` |
 | `GET /api/tasks/:id/pr` | **Branch 1**: the proposed PR as JSON `{ title, body }`. `404` if there's no proposal |
 | `PUT /api/tasks/:id/pr` | edit the proposed PR title/description before approving. Only allowed while `kind = implement` and `state = awaiting_approval`. Body: JSON `{ "title"?: "…", "body"?: "…" }` (send either or both) |
-| `GET /api/tasks/:id/merge` | **Branch 1**: the pending merge proposal created from an approving PR review (`MERGE_APPROVAL.md`, markdown). `404` if there's no merge proposal |
+| `GET /api/tasks/:id/merge` | **Branch 1**: the pending merge proposal approval comment (`MERGE_APPROVAL.md`, markdown). `404` if there's no merge proposal |
+| `GET /api/tasks/:id/merge/context` | **Branch 1**: structured merge proposal context as JSON `{ prNumber, approvedBy, reviewUrl, commentMarkdown }`. `approvedBy` and `reviewUrl` come from the approving PR review metadata, while `commentMarkdown` is the same approval comment returned by `GET …/merge`. `404` if there's no merge proposal; `409` if the task is not awaiting merge confirmation |
 | `POST /api/tasks/:id/merge` | **Branch 1**: confirm the merge proposal. Merges the tracked PR using the repo's configured `merge_method` (`squash` by default), marks the task `done`, and clears its notification. `409` if the task has no tracked PR or GitHub says the PR is missing/not mergeable |
 | `GET /api/tasks/:id/prompt` | the exact prompt piped into Codex on the latest run (markdown). `404` until a run has started |
 | `GET /api/tasks/:id/log` | a bounded JSON page of the latest run's Codex transcript. Defaults to the newest 50 JSONL entries; `404` until a log exists |
@@ -203,8 +205,9 @@ Use `status` for display and the `can*` flags to decide which buttons to show.
 When `canApprove` is true, `proposes` says what the approve button does: `"review"`
 submits an approving PR review with `REVIEW.md` as the body (fetch via
 `GET …/review`), `"pr"` opens the proposed PR (fetch via `GET …/pr`), and
-`"merge"` merges the tracked PR (fetch the approval context via `GET …/merge`;
-`POST …/merge` is the explicit confirmation endpoint). When
+`"merge"` merges the tracked PR (fetch approver identity, review URL, and the
+approval comment via `GET …/merge/context`; `GET …/merge` remains available for
+raw markdown clients; `POST …/merge` is the explicit confirmation endpoint). When
 `canComment` is true, `POST …/comment` posts the same `REVIEW.md` as a plain PR
 comment instead of approving the PR; it is rejected if the saved review is empty
 or whitespace-only.
@@ -243,8 +246,9 @@ or whitespace-only.
   `POST …/approve` to open the PR. It then shows `in review` until that PR merges
   (`done`) or closes (`cancelled`). If the PR receives an approving review first,
   the same task returns to `awaiting approval` with `proposes = "merge"`; fetch
-  `GET …/merge` to read the approval comment and `POST …/merge` (or
-  `POST …/approve`) to merge the PR and mark the task done.
+  `GET …/merge/context` to read the approver, review URL, and approval comment
+  and `POST …/merge` (or `POST …/approve`) to merge the PR and mark the task
+  done.
 - **Branch 3 (review)**: a task appears with `kind=review`, `canApprove`, and
   `canComment` → `GET …/review` → either `POST …/approve` to submit an approving
   PR review or `POST …/comment` to post non-empty review text as a plain PR
