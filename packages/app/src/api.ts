@@ -972,13 +972,17 @@ export function registerApi(app: FastifyInstance): void {
       pending.task.subject_number,
       pending.review,
     );
-    await setTaskState(id, "awaiting_external");
+    // The review is delivered — ownership passes to the PR author. If they push
+    // new commits the poller/webhook starts a fresh review task, so this run is
+    // done rather than lingering in awaiting_external until the PR merges.
+    await setTaskState(id, "done", "review posted as comment");
     await clearNotification(taskNotifyTag(id));
     logger.info({ taskId: id }, "review posted as comment");
     return { ok: true };
   });
 
-  // Approve a proposal. Branch 3 (review) → submit an approving PR review.
+  // Approve a proposal. Branch 3 (review) → submit an approving PR review and
+  // mark the task done (ownership then rests with the PR author).
   // Branch 1 (issue-origin implement) → bring the branch up to date with main
   // and open the proposed PR, then wait on the external PR lifecycle.
   app.post("/api/tasks/:id/approve", async (req, reply) => {
@@ -999,7 +1003,10 @@ export function registerApi(app: FastifyInstance): void {
         pending.task.subject_number,
         pending.review,
       );
-      await setTaskState(id, "awaiting_external");
+      // The review is submitted — ownership passes to the PR author. If they push
+      // new commits the poller/webhook starts a fresh review task, so this run is
+      // done rather than lingering in awaiting_external until the PR merges.
+      await setTaskState(id, "done", "PR review approved");
       await clearNotification(taskNotifyTag(id));
       logger.info({ taskId: id }, "PR review approved");
       return { ok: true };
