@@ -69,7 +69,9 @@ review. In this mode, `type` is required and the server still checks that the
 requested action applies:
 
 - `implement` accepts an open issue or open PR and creates the normal draft task.
-- `review` accepts only an open PR and creates or refreshes a review task.
+- `review` accepts only an open PR and creates or refreshes a review task. The
+  response also includes an `assignees` array (the PR's assignee logins) so the
+  caller knows who owns the PR being reviewed.
 - `resolve` accepts only an open PR that is currently conflicting; mergeable PRs
   return `409`.
 

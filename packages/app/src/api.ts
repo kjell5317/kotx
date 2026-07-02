@@ -696,12 +696,18 @@ function ignoredStatus(reason: string): number {
   return reason === "repo-not-enabled" ? 404 : 409;
 }
 
-function sendManualRunResult(reply: FastifyReply, result: IngestResult) {
-  if (result.status === "enqueued") return reply.code(202).send(result);
-  if (result.status === "handled") return reply.code(200).send(result);
+function sendManualRunResult(
+  reply: FastifyReply,
+  result: IngestResult,
+  extra: Record<string, unknown> = {},
+) {
+  if (result.status === "enqueued")
+    return reply.code(202).send({ ...result, ...extra });
+  if (result.status === "handled")
+    return reply.code(200).send({ ...result, ...extra });
   return reply
     .code(ignoredStatus(result.reason))
-    .send({ error: result.reason, ...result });
+    .send({ error: result.reason, ...result, ...extra });
 }
 
 let docker: Docker | undefined;
@@ -792,10 +798,14 @@ export function registerApi(app: FastifyInstance): void {
       });
     }
 
-    const result =
-      input.type === "review"
-        ? await startReview(repo, subject, "api")
-        : await maybeResolveConflict(repo, subject, "api");
+    if (input.type === "review") {
+      const result = await startReview(repo, subject, "api");
+      // Surface who the PR is assigned to so the caller knows who owns it.
+      return sendManualRunResult(reply, result, {
+        assignees: subject.assignees,
+      });
+    }
+    const result = await maybeResolveConflict(repo, subject, "api");
     return sendManualRunResult(reply, result);
   });
 

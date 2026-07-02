@@ -44,6 +44,8 @@ Your previous review was:
 2. Use the existing discussion as context. If earlier substantive review findings
    are present, verify whether they are resolved in the current code before
    looking for new issues.
+   Report issues introduced or affected by this diff; don't flag pre-existing
+   problems in unchanged code unless the diff newly interacts with them.
 3. Evaluate correctness, edge cases, security, tests, and clarity. You may build
    and run tests to verify behavior (network + root available; Node and Python 3
    with `uv` preinstalled){{#if dockerAvailable}}, and Docker is available via a
