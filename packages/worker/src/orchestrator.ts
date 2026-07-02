@@ -2,11 +2,13 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   acquireRepoSlot,
+  addRun,
   clearCancelFlag,
   clearNotification,
   enqueueTask,
   finishRun,
   findLatestPriorImplementTask,
+  findLatestPriorReviewTask,
   getEnabledRepo,
   getOctokit,
   getRun,
@@ -37,7 +39,6 @@ import {
 import { ensureFreshAuth } from "./codexAuth.js";
 import {
   addImplementWorktree,
-  commitAll,
   ensureMirrorFetched,
   findConflictMarkers,
   headSha,
@@ -58,12 +59,21 @@ import {
   readArtifact,
   readArtifacts,
   readPrTemplate,
+  type Artifacts,
 } from "./outputs.js";
-import { containerName, killContainer, runCodexContainer } from "./runner.js";
+import {
+  containerName,
+  killContainer,
+  runCodexContainer,
+  runCommitContainer,
+} from "./runner.js";
 import { renderPrompt, type PromptKind, type TaskContext } from "./templates.js";
 
 const RETRY_DELAY_MS = 5000;
 const CANCEL_POLL_MS = 3000;
+// How many times we re-run Codex to fix a hook rejection before giving up. Each
+// attempt is a full Codex run, so keep this small.
+const MAX_HOOK_REPAIR_ATTEMPTS = 2;
 
 function subjectLabel(task: Task): string {
   const kind = task.subject_type === "pull_request" ? "PR" : "Issue";
@@ -279,6 +289,25 @@ async function loadPreviousTaskBrief(ctx: RunCtx): Promise<string | null> {
   return readArtifact(taskDirFor(loadEnv().agentDataDir, prior.id), "TASK.md");
 }
 
+/** The most recent prior review of this PR (its REVIEW.md text + the SHA it ran
+ *  against), or null if this is the first review. */
+async function loadPreviousReview(
+  ctx: RunCtx,
+): Promise<{ review: string; reviewedSha?: string } | null> {
+  const prior = await findLatestPriorReviewTask({
+    repoFullName: ctx.task.repo_full_name,
+    subjectNumber: ctx.task.subject_number,
+    excludeTaskId: ctx.task.id,
+  });
+  if (!prior) return null;
+  const review = await readArtifact(
+    taskDirFor(loadEnv().agentDataDir, prior.id),
+    "REVIEW.md",
+  );
+  if (review === null) return null;
+  return { review, reviewedSha: prior.reviewed_head_sha ?? undefined };
+}
+
 /** Branch 1, execute phase: implement the approved brief, push, comment. */
 async function runImplement(ctx: RunCtx, merge: MergeResult): Promise<void> {
   const brief =
@@ -286,18 +315,24 @@ async function runImplement(ctx: RunCtx, merge: MergeResult): Promise<void> {
     `${ctx.subject.title}\n\n${ctx.subject.body}`;
   // Issue-origin work has no PR yet: the agent proposes one for human approval.
   const opensPr = ctx.task.subject_type === "issue";
-  const guarded = await runPrompt(ctx, "implement", {
-    taskBrief: brief,
-    mergeConflicts: merge.conflicted ? merge.files : undefined,
-    opensPr,
-    prTemplate: opensPr
-      ? ((await readPrTemplate(ctx.worktreePath)) ?? undefined)
-      : undefined,
-  });
+  const prTemplate = opensPr
+    ? ((await readPrTemplate(ctx.worktreePath)) ?? undefined)
+    : undefined;
+  // Rendered once and reused for hook-repair reruns (with the hook output added).
+  const render = (c: RunCtx, hookFailure?: string) =>
+    runPrompt(c, "implement", {
+      taskBrief: brief,
+      mergeConflicts: merge.conflicted ? merge.files : undefined,
+      opensPr,
+      prTemplate,
+      hookFailure,
+    });
+  const guarded = await render(ctx);
   await finalizeWrite(ctx, guarded, merge, {
     forceWithLease: ctx.task.subject_type === "issue",
     successState: "awaiting_external",
     proposePr: opensPr,
+    rerun: render,
   });
 }
 
@@ -314,18 +349,29 @@ async function runResolveConflict(ctx: RunCtx, merge: MergeResult): Promise<void
     await removeWorktree(ctx.repoFullName, ctx.worktreePath);
     return;
   }
-  const guarded = await runPrompt(ctx, "resolve_conflict", {
-    mergeConflicts: merge.files,
-  });
+  const render = (c: RunCtx, hookFailure?: string) =>
+    runPrompt(c, "resolve_conflict", {
+      mergeConflicts: merge.files,
+      hookFailure,
+    });
+  const guarded = await render(ctx);
   await finalizeWrite(ctx, guarded, merge, {
     forceWithLease: false,
     successState: "done",
+    rerun: render,
   });
 }
 
 /** Branch 3: read-only review → REVIEW.md, then await my approval to submit it. */
 async function runReview(ctx: RunCtx): Promise<void> {
-  const guarded = await runPrompt(ctx, "review", {});
+  // A reviewed PR that got new commits spins up a fresh review task (the prior
+  // one is terminal). Carry the prior review forward so this one builds on it
+  // and scopes to the new commits rather than starting from scratch.
+  const prior = await loadPreviousReview(ctx);
+  const guarded = await runPrompt(ctx, "review", {
+    previousReview: prior?.review,
+    previousReviewedSha: prior?.reviewedSha,
+  });
   const reviewMd = await readArtifact(ctx.worktreePath, "REVIEW.md");
   const outcome = classifyOutcome({
     exitCode: guarded.exitCode,
@@ -369,19 +415,21 @@ async function finalizeWrite(
     // issue-origin implement: store the proposed PR and await approval instead
     // of posting a summary and going straight to awaiting_external.
     proposePr?: boolean;
+    // Re-render + re-run Codex to fix a git-hook rejection (fresh run each time).
+    rerun: (ctx: RunCtx, hookFailure: string) => Promise<Guarded>;
   },
 ): Promise<void> {
-  const artifacts = await readArtifacts(ctx.worktreePath);
+  const initial = await readArtifacts(ctx.worktreePath);
   const outcome = classifyOutcome({
     exitCode: guarded.exitCode,
-    producedOutput: artifacts.resultMd !== null,
+    producedOutput: initial.resultMd !== null,
     killedByCancel: guarded.killedByCancel,
     killedByTimeout: guarded.killedByTimeout,
   });
   await finishRun(ctx.runId, {
     outcome,
     exitCode: guarded.exitCode,
-    resultMd: artifacts.resultMd,
+    resultMd: initial.resultMd,
   });
 
   if (outcome !== "completed") {
@@ -405,14 +453,16 @@ async function finalizeWrite(
     return;
   }
 
-  const msgFile = join(ctx.runOutputDir, "COMMIT_MSG.txt");
-  await writeFile(
-    msgFile,
-    artifacts.commitMsg ?? defaultCommitMsg(ctx.task),
-    "utf8",
-  );
-  await deleteArtifacts(ctx.worktreePath);
-  const committed = await commitAll(ctx.worktreePath, msgFile);
+  // Commit inside the sandbox with the repo's git hooks enabled; on a hook
+  // rejection this re-runs Codex to fix it, up to a bounded number of attempts.
+  const commit = await commitWithHookRepair(ctx, opts.rerun);
+  if (!commit.ok) {
+    ctx.setReason(commit.reason);
+    await setTaskState(ctx.task.id, commit.state, commit.reason);
+    await removeWorktree(ctx.repoFullName, ctx.worktreePath);
+    return;
+  }
+  const { committed, artifacts } = commit;
   if (committed || merge.advanced) {
     await pushBranch(ctx.repoFullName, ctx.branch, gitToken(), {
       forceWithLease: opts.forceWithLease,
@@ -443,6 +493,79 @@ async function finalizeWrite(
   await postSummary(ctx.octokit, ctx.repoFullName, ctx.task.subject_number, body);
   await setTaskState(ctx.task.id, opts.successState);
   await removeWorktree(ctx.repoFullName, ctx.worktreePath);
+}
+
+type CommitResult =
+  | { ok: true; committed: boolean; artifacts: Artifacts }
+  | { ok: false; state: TaskState; reason: string };
+
+/**
+ * Commit the finished work through the repo's own git hooks (run in the sandbox
+ * by runCommitContainer). If a hook rejects the commit, re-run Codex with the
+ * hook output so it can fix the failure, then try again — up to
+ * MAX_HOOK_REPAIR_ATTEMPTS. Each repair is a fresh TaskRun so its log/artifacts
+ * are tracked independently. Returns the artifacts read from the attempt that
+ * committed (they're stripped from the tree before each commit, so the caller
+ * can't re-read them afterwards).
+ */
+async function commitWithHookRepair(
+  ctx: RunCtx,
+  rerun: (ctx: RunCtx, hookFailure: string) => Promise<Guarded>,
+): Promise<CommitResult> {
+  const env = loadEnv();
+  let active = ctx;
+  for (let attempt = 0; ; attempt++) {
+    // Read the summary/commit-message artifacts, then strip them from the tree so
+    // they never land in the commit itself.
+    const artifacts = await readArtifacts(active.worktreePath);
+    const msgFile = join(active.runOutputDir, "COMMIT_MSG.txt");
+    await writeFile(msgFile, artifacts.commitMsg ?? defaultCommitMsg(ctx.task), "utf8");
+    await deleteArtifacts(active.worktreePath);
+
+    const commit = await runCommitContainer({
+      name: `${active.containerName}-commit`,
+      worktreePath: active.worktreePath,
+      runOutputDir: active.runOutputDir,
+      mirrorPath: active.mirror,
+    });
+    if (commit.status === "committed") return { ok: true, committed: true, artifacts };
+    if (commit.status === "nothing") return { ok: true, committed: false, artifacts };
+
+    // A git hook rejected the commit.
+    if (attempt >= MAX_HOOK_REPAIR_ATTEMPTS) {
+      return {
+        ok: false,
+        state: "failed",
+        reason: `pre-commit hooks failed after ${attempt} repair attempt(s)`,
+      };
+    }
+
+    // Spin up a fresh run and ask Codex to fix what the hooks flagged.
+    const run = await addRun(ctx.task.id, env.agentDataDir);
+    const runOutputDir = runDirFor(env.agentDataDir, run.id);
+    await mkdir(runOutputDir, { recursive: true });
+    const name = containerName(run.id);
+    await markRunStarted(run.id, name, join(runOutputDir, "codex.jsonl"));
+    const repairCtx: RunCtx = { ...ctx, runId: run.id, runOutputDir, containerName: name };
+
+    const guarded = await rerun(repairCtx, commit.hookOutput);
+    const resultMd = await readArtifact(repairCtx.worktreePath, "AGENT_RESULT.md");
+    const outcome = classifyOutcome({
+      exitCode: guarded.exitCode,
+      producedOutput: resultMd !== null,
+      killedByCancel: guarded.killedByCancel,
+      killedByTimeout: guarded.killedByTimeout,
+    });
+    await finishRun(run.id, { outcome, exitCode: guarded.exitCode, resultMd });
+    if (outcome !== "completed") {
+      return {
+        ok: false,
+        state: failureState(outcome),
+        reason: describeRunFailure(outcome, guarded.exitCode),
+      };
+    }
+    active = repairCtx;
+  }
 }
 
 interface MergeResult {

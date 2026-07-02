@@ -102,6 +102,28 @@ export async function findLatestPriorImplementTask(input: {
   return res.rows[0];
 }
 
+/** Most recent prior review task for the same PR (any state), so a follow-up
+ *  review can build on the last one. Carries `reviewed_head_sha` — the commit the
+ *  previous review ran against — for scoping the diff to the new commits. */
+export async function findLatestPriorReviewTask(input: {
+  repoFullName: string;
+  subjectNumber: number;
+  excludeTaskId: number;
+}): Promise<Task | undefined> {
+  const res = await getPool().query<Task>(
+    `SELECT * FROM tasks
+     WHERE repo_full_name = $1
+       AND subject_type = 'pull_request'
+       AND subject_number = $2
+       AND kind = 'review'
+       AND id <> $3
+     ORDER BY updated_at DESC, id DESC
+     LIMIT 1`,
+    [input.repoFullName, input.subjectNumber, input.excludeTaskId],
+  );
+  return res.rows[0];
+}
+
 /**
  * Whether any task (in any state) exists for a subject. The poller uses this to
  * fire assignment/review triggers at most once per subject — without labels to

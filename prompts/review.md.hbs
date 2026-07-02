@@ -22,6 +22,21 @@ Your review was requested on this PR. Produce a thorough, useful code review.
 {{/each}}
 {{/if}}
 
+{{#if previousReview}}
+## Build on your previous review
+You already reviewed this PR{{#if previousReviewedSha}} at commit `{{previousReviewedSha}}`{{/if}}, and new commits have since been pushed. Continue from that review rather than starting over:
+
+- Focus on what changed since then{{#if previousReviewedSha}} — see the new commits with `git diff {{previousReviewedSha}}...HEAD`{{/if}}, then read the surrounding code for context.
+- Re-check each earlier finding: if it's now addressed, don't repeat it; if it's still present, carry it forward and note that it remains unresolved.
+- If the new commits look like they were pushed in response to your feedback, acknowledge what's resolved.
+
+Your previous review was:
+
+```
+{{previousReview}}
+```
+{{/if}}
+
 ## What to do
 
 1. Inspect the diff against the base branch (e.g. `git diff origin/{{defaultBranch}}...HEAD`)

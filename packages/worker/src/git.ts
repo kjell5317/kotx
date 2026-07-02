@@ -71,34 +71,6 @@ export function issueBranchName(issueNumber: number, title: string): string {
   return slug ? `${issueNumber}-${slug}` : `${issueNumber}`;
 }
 
-/** Stage everything and commit. Returns false if there was nothing to commit. */
-export async function commitAll(
-  worktreePath: string,
-  commitMsgFile: string,
-): Promise<boolean> {
-  const env = loadEnv();
-  await run("git", ["-C", worktreePath, "add", "-A"]);
-  const { stdout } = await run("git", [
-    "-C",
-    worktreePath,
-    "status",
-    "--porcelain",
-  ]);
-  if (stdout.trim() === "") return false;
-  await run("git", [
-    "-C",
-    worktreePath,
-    "-c",
-    `user.name=${env.github.committerName}`,
-    "-c",
-    `user.email=${env.github.committerEmail}`,
-    "commit",
-    "-F",
-    commitMsgFile,
-  ]);
-  return true;
-}
-
 async function resolveRef(mirror: string, ref: string): Promise<string | null> {
   try {
     const { stdout } = await run("git", [

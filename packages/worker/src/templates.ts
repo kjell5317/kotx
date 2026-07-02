@@ -47,6 +47,13 @@ export interface TaskContext {
   prTemplate?: string;
   // true when the per-run dev-container (DinD) sidecar is enabled.
   dockerAvailable?: boolean;
+  // write-kinds only: set on a hook-repair rerun. The output from the repo's git
+  // hooks that rejected the previous commit, so Codex can fix and retry.
+  hookFailure?: string;
+  // review only: a prior review of this PR to build on (its exact REVIEW.md), and
+  // the commit SHA that review ran against, so the follow-up scopes to new commits.
+  previousReview?: string;
+  previousReviewedSha?: string;
 }
 
 const FILE_BY_KIND: Record<PromptKind, string> = {

@@ -1,4 +1,4 @@
-import { cp, mkdir } from "node:fs/promises";
+import { cp, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import Docker from "dockerode";
 import { loadDefaults, loadEnv, logger } from "@kotx/shared";
@@ -214,6 +214,115 @@ export async function runCodexContainer(opts: {
   } finally {
     if (useDind) await teardownDind(dk, opts.runId);
   }
+}
+
+/**
+ * Commit the worktree inside the sandbox with the repository's own git hooks
+ * ENABLED, so a `pre-commit`/`commit-msg` hook that rejects the change fails the
+ * commit here instead of on the worker host (untrusted repo code stays in the
+ * same locked-down container Codex runs in). A commit is purely local — no creds
+ * or remote — so the host still owns the push afterwards.
+ *
+ * Reads the message from /run-output/COMMIT_MSG.txt and tees the hook output to
+ * /run-output/HOOKS.log. Resolves with:
+ *   - "committed":   a commit was created (hooks passed)
+ *   - "nothing":     nothing staged to commit (no-op; not a failure)
+ *   - "hook_failed": git commit exited non-zero (a hook rejected it)
+ * `hookOutput` carries the tee'd log for the "hook_failed" case (empty otherwise).
+ *
+ * A present `.pre-commit-config.yaml` whose git hook isn't wired up is treated as
+ * a failure (not a silent pass): the framework's checks would otherwise be
+ * skipped entirely. Wiring the hook (`pre-commit install`, persisted via the
+ * mirror) is Codex's job; this container supplies the `pre-commit` CLI the wired
+ * hook invokes, since a global install in Codex's own container doesn't persist.
+ */
+export async function runCommitContainer(opts: {
+  name: string;
+  worktreePath: string;
+  runOutputDir: string;
+  mirrorPath: string;
+}): Promise<{
+  status: "committed" | "nothing" | "hook_failed";
+  exitCode: number;
+  hookOutput: string;
+}> {
+  const env = loadEnv();
+  const defaults = loadDefaults();
+  const { container: c } = defaults;
+  const dk = getDocker();
+
+  // `exit 3` = clean tree (nothing to commit); `exit 4` = a pre-commit config is
+  // present but its hook isn't installed (its checks would be skipped); any other
+  // non-zero = a hook (or git) rejected the commit. safe.directory '*' avoids
+  // git's dubious-ownership guard for the bind-mounted worktree/mirror.
+  const script = [
+    "set -o pipefail",
+    "git config --global --add safe.directory '*'",
+    "cd /workspace",
+    "git add -A",
+    'if [ -z "$(git status --porcelain)" ]; then exit 3; fi',
+    // A pre-commit config that isn't wired up would let the commit pass while
+    // skipping every configured check. Fail so the repair loop tells Codex to
+    // `pre-commit install`; then make the CLI the hook calls available here.
+    "if [ -f .pre-commit-config.yaml ] || [ -f .pre-commit-config.yml ]; then",
+    '  hook="$(git rev-parse --git-path hooks/pre-commit)";',
+    '  if ! grep -qi pre-commit "$hook" 2>/dev/null; then',
+    '    { echo "This repository has a .pre-commit-config.yaml but its pre-commit git hook is not installed, so its checks would be skipped."; echo "Install and wire it up: pip install pre-commit && pre-commit install"; } > /run-output/HOOKS.log;',
+    "    exit 4;",
+    "  fi;",
+    "  command -v pre-commit >/dev/null 2>&1 || python -m pip install --break-system-packages --quiet pre-commit >/dev/null 2>&1 || true;",
+    "fi",
+    'git -c user.name="$GIT_COMMITTER_NAME" -c user.email="$GIT_COMMITTER_EMAIL"' +
+      " commit -F /run-output/COMMIT_MSG.txt > /run-output/HOOKS.log 2>&1",
+  ].join("\n");
+
+  const image = runnerImage();
+  await ensureImage(dk, image);
+
+  const created = await dk.createContainer({
+    Image: image,
+    name: opts.name,
+    WorkingDir: "/workspace",
+    Env: [
+      `GIT_COMMITTER_NAME=${env.github.committerName}`,
+      `GIT_COMMITTER_EMAIL=${env.github.committerEmail}`,
+    ],
+    Cmd: ["bash", "-lc", script],
+    HostConfig: {
+      Binds: [
+        `${opts.worktreePath}:/workspace:rw`,
+        `${opts.runOutputDir}:/run-output:rw`,
+        `${opts.mirrorPath}:${opts.mirrorPath}:rw`,
+      ],
+      NetworkMode: c.network,
+      NanoCpus: Math.floor(c.cpus * 1e9),
+      Memory: parseMemory(c.memory),
+      AutoRemove: false,
+      CapDrop: ["ALL"],
+      SecurityOpt: ["no-new-privileges"],
+    },
+  });
+
+  let exitCode: number;
+  const wallClock = defaults.timeouts.task_wall_clock_sec;
+  const timeout = setTimeout(() => void killContainer(opts.name), wallClock * 1000);
+  try {
+    await created.start();
+    const res = (await created.wait()) as { StatusCode: number };
+    exitCode = res.StatusCode;
+  } finally {
+    clearTimeout(timeout);
+    await created.remove({ force: true }).catch((err) => {
+      logger.warn({ err, name: opts.name }, "commit container remove failed");
+    });
+  }
+
+  if (exitCode === 3) return { status: "nothing", exitCode, hookOutput: "" };
+  if (exitCode === 0) return { status: "committed", exitCode, hookOutput: "" };
+  const hookOutput = await readFile(join(opts.runOutputDir, "HOOKS.log"), "utf8").catch(
+    () => "",
+  );
+  return { status: "hook_failed", exitCode, hookOutput };
 }
 
 export async function killContainer(name: string): Promise<void> {

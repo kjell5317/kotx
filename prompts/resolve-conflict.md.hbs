@@ -47,7 +47,22 @@ working tree** for you to resolve.
   reachable at host `dind` and are destroyed when the run ends.
 {{/if}}
 - Do not touch git history or remotes — the host finalizes the merge commit and
-  pushes after you finish.
+  pushes after you finish. It commits with **this repository's git hooks enabled**,
+  so ensure any `pre-commit`/`commit-msg` hooks pass (install their toolchain if
+  needed, e.g. `npm install`, `pre-commit install`). If the repo has a
+  `.pre-commit-config.yaml` you MUST `pip install pre-commit && pre-commit install`
+  — the commit is rejected if that hook isn't wired up.
+
+{{#if hookFailure}}
+## ⚠️ Fix the failing git hooks
+The commit of your previous attempt was **rejected by this repository's git
+hooks**. Fix the underlying problems so they pass — do not disable or bypass them
+(no `--no-verify`). Hook output from the rejected commit:
+
+```
+{{hookFailure}}
+```
+{{/if}}
 
 ## Voice
 

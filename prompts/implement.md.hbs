@@ -10,6 +10,19 @@ of truth for what to build.
 
 {{taskBrief}}
 
+{{#if hookFailure}}
+## ⚠️ Fix the failing git hooks
+Your previous attempt was implemented, but the commit was **rejected by this
+repository's git hooks**. Fix the underlying problems so the hooks pass — do not
+disable, skip, or bypass them (no `--no-verify`). Install the hook toolchain if
+needed (e.g. `npm install`, `pre-commit install`) and re-run the hooks yourself
+until they are green. Hook output from the rejected commit:
+
+```
+{{hookFailure}}
+```
+{{/if}}
+
 {{#if mergeConflicts.length}}
 ## ⚠️ Resolve merge conflicts first
 The latest default branch was merged into this branch and these files conflict.
@@ -35,15 +48,21 @@ part of your work — leave no `<<<<<<<`/`=======`/`>>>>>>>` markers behind:
   when the run ends — no need to clean up.
 {{/if}}
 - Do not touch git history or remotes. The host commits and pushes your branch
-  after you finish.
+  after you finish — and it commits with **this repository's git hooks enabled**,
+  so the commit will be rejected if a `pre-commit`/`commit-msg` hook fails. Make
+  sure the hook toolchain is installed (e.g. `npm install`, `pre-commit install`)
+  and that the hooks pass before you finish. In particular, if the repo has a
+  `.pre-commit-config.yaml` you MUST `pip install pre-commit && pre-commit install`
+  — the commit is rejected if that hook isn't wired up.
 
 ## Definition of Done
 
 1. The brief is implemented, focused, and reviewable.
 2. No unrelated refactors; preserve existing behavior unless the brief asks
    otherwise.
-3. Add or update tests where appropriate, and run the project's checks where you
-   can.
+3. Add or update tests where appropriate. The repository's git hooks must pass:
+   the host commits with hooks enabled, so run them yourself (a `git commit` would
+   trigger them) and make them green before finishing.
 4. Write a concise summary of what you changed to `/workspace/AGENT_RESULT.md`
    (template below).
 5. Write a clear commit message (one-line subject + body) to
