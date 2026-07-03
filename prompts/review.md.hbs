@@ -47,8 +47,8 @@ Your previous review was:
    Report issues introduced or affected by this diff; don't flag pre-existing
    problems in unchanged code unless the diff newly interacts with them.
 3. Evaluate correctness, edge cases, security, tests, and clarity. You may build
-   and run tests to verify behavior (network + root available; Node and Python 3
-   with `uv` preinstalled){{#if dockerAvailable}}, and Docker is available via a
+   and run tests to verify behavior (network + root available; Node, Python 3
+   with `uv`, and Playwright's Chromium preinstalled){{#if dockerAvailable}}, and Docker is available via a
    private per-run daemon (`docker run …`; services reachable at host `dind`,
    auto-destroyed at run end){{/if}} — but make no source changes.
 4. If web search is available, use it for current external documentation when

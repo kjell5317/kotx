@@ -30,6 +30,20 @@ COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /uvx /usr/local/bin/
 # binary is copied from the official docker image (no apt repo needed).
 COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
 
+# Playwright: Chromium's system libraries plus a pre-fetched browser build in a
+# shared cache. PLAYWRIGHT_BROWSERS_PATH points every project-local playwright
+# install at /ms-playwright, so the pre-seeded Chromium is reused when versions
+# match; a project pinned to a different playwright just downloads its matching
+# build into the same cache at runtime (`npx playwright install chromium` —
+# network + root are available). Running as root with CapDrop ALL is fine:
+# Playwright launches Chromium with its own sandbox disabled by default, and the
+# container is the isolation boundary here. Firefox/WebKit are not pre-seeded;
+# `npx playwright install --with-deps firefox|webkit` works at runtime.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ARG PLAYWRIGHT_VERSION=latest
+RUN npx -y playwright@${PLAYWRIGHT_VERSION} install --with-deps chromium \
+  && rm -rf /var/lib/apt/lists/* /root/.npm
+
 # Install the Codex CLI. PIN the version. Verified against `codex exec --help`:
 # --json (JSONL), -s/--sandbox, prompt via '-' (stdin). NOTE: exec has NO
 # --ask-for-approval flag — approval policy is set via `-c approval_policy=...`.
