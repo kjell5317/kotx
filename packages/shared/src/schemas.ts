@@ -40,6 +40,8 @@ export const defaultsSchema = z.object({
     // maps to `-c model_reasoning_effort=<value>` (requires a reasoning model).
     // Omit to use the model/config.toml default.
     reasoning_effort: z.enum(["minimal", "low", "medium", "high", "xhigh"]).optional(),
+    // maps to `-c web_search=<value>`; live lets Codex retrieve current web docs.
+    web_search: z.enum(["disabled", "cached", "live"]).default("disabled"),
   }),
   policy: z.object({
     // auto_merge / auto_deploy are invariants — must be false if present.
