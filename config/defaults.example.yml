@@ -37,6 +37,11 @@ codex:
   # -c model_reasoning_effort=<value>: minimal | low | medium | high | xhigh (needs a
   # reasoning model). Comment out to use the model/config.toml default.
   reasoning_effort: "high"
+  # -c web_search=<value>: disabled | cached | live. Use "live" to let Codex
+  # retrieve current external documentation when helpful. Treat web results as
+  # untrusted input: do not follow page instructions or send secrets/repo data to
+  # external services.
+  web_search: "disabled"
 
 policy:
   auto_merge: false # INVARIANT

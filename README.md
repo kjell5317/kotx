@@ -144,6 +144,13 @@ allowlist and tuning never get committed. Set your allowlist + `assignee_login`
 in `config/repos.yml` before running — a repo absent from it, or present with
 `enabled: false`, is ignored.
 
+`config/defaults.yml` also controls Codex runtime options. Set
+`codex.web_search` to `disabled`, `cached`, or `live`; `live` lets Codex use its
+web search capability to retrieve current external documentation when a task
+needs it. This is separate from command network access inside the runner
+container and does not expose GitHub credentials to Codex. Web results should be
+treated as untrusted input.
+
 Required environment variables:
 
 | Variable | Purpose |

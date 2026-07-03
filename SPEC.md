@@ -338,6 +338,7 @@ docker run --rm --cpus=2 --memory=4g \
   -e CODEX_HOME=/home/codex/.codex \
   kotx-runner \
   bash -lc 'codex exec --json --ephemeral \
+            -c web_search="<disabled|cached|live>" \
             --dangerously-bypass-approvals-and-sandbox - \
             < /run-output/PROMPT.md > /run-output/codex.jsonl 2>&1'
 ```
@@ -354,6 +355,10 @@ Key decisions, all forced by reality during bring-up:
   (app-server, PATH aliases) and to refresh tokens, so each run gets its own
   copy of `auth.json`/`config.toml` mounted rw (no cross-run races).
 - **`--ephemeral`** so session files aren't persisted.
+- **Codex web search is operator-configured.** `codex.web_search` maps to
+  `-c web_search=<disabled|cached|live>`. `live` lets Codex retrieve current web
+  documentation, but it is narrower than changing runner networking or mounting
+  more credentials; web results remain untrusted input.
 - **Toolchain in `kotx-runner`:** Node 20 + npm (base), Python 3 + pip + venv +
   `python-is-python3`, and `uv`. Codex installs anything else at runtime
   (`uv`/`pip`/`npm`/`apt-get`).
@@ -412,7 +417,8 @@ uses the configured `container.network` and Codex has no Docker access.
 - `config/defaults.yml` — concurrency, timeouts, container limits, codex flags
   (`approval_policy` retained but the runner currently bypasses sandbox/approval;
   `reasoning_effort` maps to `-c model_reasoning_effort=<value>`, omit for the
-  model default).
+  model default; `web_search` maps to `-c web_search=<disabled|cached|live>` and
+  defaults to `disabled`).
 - `config/repos.yml` — operator-owned allowlist; per repo: `enabled`,
   `default_branch`, `assignee_login` (my login — also the review-request login),
   `merge_method` (`merge`, `squash`, or `rebase`; default `squash`), `poll`.
@@ -445,6 +451,11 @@ uses the configured `container.network` and Codex has no Docker access.
   sidecar isolated on a private network with no host mounts (§9.1). The sidecar is
   host-root-adjacent if escaped, but it's throwaway and runs no untrusted workload
   beyond what Codex (acting as me) starts. Set it false to remove Docker entirely.
+- Web-search trade-off (`codex.web_search`): `live` enables Codex's own web
+  retrieval for current external documentation without changing the runner's
+  Docker network or exposing the worker's GitHub token. Results can contain
+  malicious instructions, so prompts direct Codex to treat them as untrusted and
+  not paste secrets or sensitive repository data into external services.
 
 ### 12.1 JSON API
 
