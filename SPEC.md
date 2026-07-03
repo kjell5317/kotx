@@ -479,7 +479,9 @@ optional `repo` accepts full names plus the per-repo `aliases` from
 document endpoints (`…/task`, `…/review`, `…/pr`) keep serving their artifacts
 after terminal states (they're indexed externally). Repeat triggers on a
 `(repo, subjectNumber, kind)` tuple refresh the existing non-terminal task
-instead of creating a second row. When `WEBHOOK_URL`/`WEBHOOK_SECRET` are set,
+instead of creating a second row; a task matches by its own subject number or
+its tracked `pr_number`, so feedback on the PR opened from an issue-origin task
+folds into that task. When `WEBHOOK_URL`/`WEBHOOK_SECRET` are set,
 every task state change POSTs a `task.state_changed` payload (full task DTO,
 HMAC-SHA256-signed as `X-Kotx-Signature`) with bounded retries; consumers treat
 deliveries as unordered upserts. External frontends deep-link tasks via the

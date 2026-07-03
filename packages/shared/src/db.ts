@@ -84,8 +84,11 @@ export async function findActiveTask(
  * The latest non-terminal task for a `(repo, subjectNumber, kind)` tuple. The
  * external task manager keeps exactly one of its tasks per issue/PR per kind, so
  * repeat triggers must fold into this row instead of creating a new one — new
- * rows are only allowed once it is terminal. Keyed on subject_number without
- * subject_type: issues and PRs share GitHub's number space.
+ * rows are only allowed once it is terminal. A task matches by its own subject
+ * number OR its tracked pr_number, so feedback addressed to the PR opened from
+ * an issue-origin task folds into that task instead of opening a second one.
+ * Safe (and subject_type-free) because issues and PRs share GitHub's number
+ * space: a given number is either an issue or a PR, never both.
  */
 export async function findNonTerminalTask(
   repoFullName: string,
@@ -94,7 +97,9 @@ export async function findNonTerminalTask(
 ): Promise<Task | undefined> {
   const res = await getPool().query<Task>(
     `SELECT * FROM tasks
-     WHERE repo_full_name = $1 AND subject_number = $2 AND kind = $3
+     WHERE repo_full_name = $1
+       AND (subject_number = $2 OR pr_number = $2)
+       AND kind = $3
        AND state::text NOT IN ${TERMINAL_STATE_SQL}
      ORDER BY updated_at DESC, id DESC
      LIMIT 1`,

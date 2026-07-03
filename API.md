@@ -148,6 +148,12 @@ for the same subject and kind is only created after the previous one is
 terminal. Consumers can therefore key their own bookkeeping on
 `repo` + `subjectNumber` + `kind` and treat every update as an upsert.
 
+A task matches its tuple by its own subject number **or** its tracked
+`prNumber`: once an issue-origin task has opened PR *N*, feedback addressed to
+PR *N* (a comment on the PR, or `POST /api/runs` with `number: N`) folds into
+the issue task rather than opening a second implement task. This is unambiguous
+because GitHub issues and PRs share one number space.
+
 ## State-transition webhook
 
 Set `WEBHOOK_URL` and `WEBHOOK_SECRET` in the environment to have every task
