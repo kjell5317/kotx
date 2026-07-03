@@ -346,6 +346,23 @@ export async function findTasksWaitingOnPr(repoFullName: string): Promise<Task[]
   return res.rows;
 }
 
+export async function findNonTerminalTasksOnBranch(input: {
+  repoFullName: string;
+  branchName: string;
+  excludeTaskId?: number;
+}): Promise<Task[]> {
+  const res = await getPool().query<Task>(
+    `SELECT * FROM tasks
+     WHERE repo_full_name = $1
+       AND branch_name = $2
+       AND ($3::bigint IS NULL OR id <> $3::bigint)
+       AND state::text NOT IN ${TERMINAL_STATE_SQL}
+     ORDER BY updated_at DESC, id DESC`,
+    [input.repoFullName, input.branchName, input.excludeTaskId ?? null],
+  );
+  return res.rows;
+}
+
 /** Whether a review task already exists for a PR (used to re-review new commits
  *  even after GitHub drops me from the PR's requested_reviewers). */
 export async function hasReviewTask(
@@ -417,6 +434,26 @@ export async function findOpenPrTask(
   return res.rows[0];
 }
 
+export async function findInReviewImplementTaskForPr(
+  repoFullName: string,
+  prNumber: number,
+): Promise<Task | undefined> {
+  const res = await getPool().query<Task>(
+    `SELECT * FROM tasks
+     WHERE repo_full_name = $1
+       AND kind = 'implement'
+       AND state = 'awaiting_external'
+       AND (
+         pr_number = $2
+         OR (subject_type = 'pull_request' AND subject_number = $2)
+       )
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [repoFullName, prNumber],
+  );
+  return res.rows[0];
+}
+
 export async function findTasksTrackingPr(
   repoFullName: string,
   prNumber: number,
@@ -443,6 +480,23 @@ export async function findTasksTrackingAnyPr(repoFullName: string): Promise<Task
          OR subject_type = 'pull_request'
        )
        AND state::text NOT IN ${TERMINAL_STATE_SQL}`,
+    [repoFullName],
+  );
+  return res.rows;
+}
+
+export async function findInReviewTasksTrackingAnyPr(
+  repoFullName: string,
+): Promise<Task[]> {
+  const res = await getPool().query<Task>(
+    `SELECT * FROM tasks
+     WHERE repo_full_name = $1
+       AND state = 'awaiting_external'
+       AND (
+         pr_number IS NOT NULL
+         OR subject_type = 'pull_request'
+       )
+     ORDER BY updated_at DESC, id DESC`,
     [repoFullName],
   );
   return res.rows;

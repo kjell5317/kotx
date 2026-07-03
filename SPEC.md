@@ -20,12 +20,18 @@ Triggers are plain GitHub events (or polling) keyed to your role on the subject
    PR (title + description following the repo's PR template and `CONTRIBUTING.md`)
    and waits in `awaiting_approval`; you review/edit the proposal (`GET/PUT …/pr`)
    and `POST …/approve`, which merges the default branch into the pushed branch
-   and opens the PR. The task then waits for that PR to merge or close.
-2. **Conflict (Branch 2)** — a PR assigned to you is unmergeable (`mergeable_state
-   = dirty`), detected on `pull_request` synchronize/open or a `push` to the
-   default branch. Codex resolves the in-progress merge automatically (no
-   approval), pushes, and marks that conflict task done. Any underlying
-   implement/PR task tracks review and merge progress.
+   and opens the PR. The task then waits for review. When that PR receives an
+   approving review, the same task returns to `awaiting_approval` with the
+   approval comment saved as `MERGE_APPROVAL.md`; the approver and review URL are
+   exposed by the merge proposal API from task trigger metadata. Confirming the
+   merge merges the PR on GitHub and marks the task done.
+2. **Conflict (Branch 2)** — a PR assigned to you, or a PR already tracked as in
+   review, is unmergeable (`mergeable_state = dirty`). Conflicts are detected on
+   `pull_request` synchronize/open, on a `push` to the default branch, and by a
+   periodic scan of tracked in-review PRs. Codex resolves the in-progress merge
+   automatically (no approval), pushes, and marks that conflict task done. Any
+   underlying implement/PR task tracks review and merge progress, so the same PR
+   can enqueue a later conflict task after a prior resolve task has finished.
 3. **Review (Branch 3)** — your review is requested on a PR, or such a PR gets new
    commits. A read-only review run writes `REVIEW.md`; the task waits in
    `awaiting_approval`. `POST …/approve` submits an approving PR review using
@@ -107,7 +113,8 @@ Ordered roughly by priority:
 A private coding agent that reacts to GitHub issues/PRs assigned to me, runs
 Codex in isolated Docker containers on an operator-owned Docker host, and **pushes branches +
 posts plain summaries as me**. It opens PRs only from an approved proposal (you
-review the title/description first); it never merges, never deploys, and nothing
+review the title/description first); it merges only after a human confirms a
+merge proposal created from an approving PR review, never deploys, and nothing
 it writes should read as machine-authored.
 
 ---
@@ -154,7 +161,9 @@ The agent therefore acts as **me**. No GitHub App, no installation tokens.
 ### 5.2 Two input modes (per repo)
 - **Webhook** (`poll: false`): a repo webhook → `/github/webhook`, HMAC-verified.
   Subscribe to **issues, pull_request, pull_request_review, issue_comment,
-  pull_request_review_comment, push**.
+  pull_request_review_comment, push**. A periodic reconciler still runs for
+  webhook-only repos to catch missed PR lifecycle events and recheck tracked
+  in-review PRs for conflicts.
 - **Polling** (`poll: true`): the app polls every `POLL_INTERVAL_SEC` for repos
   where I can't register a webhook. It diffs GitHub state against existing tasks
   to find new assignments, review requests, conflicts, and follow-up comments or
@@ -163,8 +172,9 @@ The agent therefore acts as **me**. No GitHub App, no installation tokens.
   a reviewed PR re-reviews when its head advances past the stored
   `reviewed_head_sha` (poll-mode stand-in for `synchronize`) or when a new
   comment/review lands on it; follow-ups arrive via cursors and
-  `github_deliveries` de-dupe; conflict checks self-limit (only fire when the PR
-  is dirty and has no active task).
+  `github_deliveries` de-dupe; tracked in-review PRs are also rechecked for
+  conflicts each tick. Conflict checks self-limit (only fire when the PR is dirty
+  and has no active task).
 
 ### 5.3 Triggers (no labels, no commands)
 All labels (`agent:*`) and `/agent` commands were **removed** in v3. Triggers are
@@ -180,13 +190,21 @@ the three role-aware workflows in §0, driven by webhook events:
   review task rather than requested-reviewer membership (GitHub drops me from
   requested reviewers once I've reviewed).
 - `pull_request` synchronize/open + `push` to the default branch, for PRs assigned
-  to me → Branch 2 (only when `mergeable_state = dirty`).
+  to me, and the periodic tracked in-review PR scan → Branch 2 (only when
+  `mergeable_state = dirty`).
 - `pull_request` opened/reopened from a pushed issue branch → record the PR and
   show the task as in review.
+- `pull_request_review` approved on an assigned PR → find the existing
+  `awaiting_external` implement task tracking that PR, save the approval comment
+  to `MERGE_APPROVAL.md`, update the trigger metadata with the reviewer and review
+  URL, and move it back to
+  `awaiting_approval` for merge confirmation. If no matching in-review implement
+  task exists, ignore the approval.
 - `pull_request` closed → close tracked open tasks as `done` when merged or
   `cancelled` with a reason when closed unmerged.
-- Polling performs the same PR-open and PR-closed reconciliation, so lifecycle
-  state does not depend on receiving every webhook.
+- Polling and the webhook-only reconciler perform the same PR-open and PR-closed
+  reconciliation, plus the tracked in-review conflict scan, so lifecycle and
+  conflict recovery do not depend on receiving every webhook.
 
 ### 5.4 Eligibility
 Repo allowlisted + enabled; subject open; my role on the subject matches the
@@ -218,6 +236,14 @@ draft refresh, the execute run, and human edits.
   `<n>-<slug>` off default; PR follow-up uses the PR's own head branch. Issue
   work moves to `awaiting_external` as "waiting on PR" until a PR is opened from
   that branch to the default branch, then "in review" until merge/close.
+- **merge proposal**: an approving PR review on an assigned PR does not refresh a
+  draft. The app saves the approval body as `MERGE_APPROVAL.md` in the tracked
+  implement task, stores the reviewer and review URL in the task trigger
+  metadata, and moves that task from `awaiting_external` to `awaiting_approval`.
+  The merge proposal API returns the markdown approval comment together with the
+  structured approver identity and review URL. Confirmation merges the tracked PR
+  with the repo's configured `merge_method` (`squash` by default) and marks the
+  task `done`; GitHub not-mergeable/conflict responses are surfaced as `409`.
 - **resolve_conflict**: merge the default branch (leaving conflicts), Codex
   resolves them, commit the merge + push → `done`. If the branch was already
   clean but the merge advanced it, the clean merge is pushed and the task is also
@@ -258,7 +284,7 @@ Task states (`1700000003000_workflow_v3.sql` added `drafting`, `draft`,
 reused):
 
 ```text
-Branch 1: drafting → draft → (start) → queued → running → awaiting_external(waiting on PR) → awaiting_external(in review) → done
+Branch 1: drafting → draft → (start) → queued → running → awaiting_external(waiting on PR) → awaiting_external(in review) → awaiting_approval(merge) → done
 Branch 2:                                queued → running → done
 Branch 3:                                queued → running → awaiting_approval → (approve/comment) → awaiting_external(in review) → done
 any:                                     … → failed | cancelled
@@ -389,7 +415,8 @@ uses the configured `container.network` and Codex has no Docker access.
   model default).
 - `config/repos.yml` — operator-owned allowlist; per repo: `enabled`,
   `default_branch`, `assignee_login` (my login — also the review-request login),
-  `poll`. Never read from a target repo. (The unused `allow_infra_changes`/
+  `merge_method` (`merge`, `squash`, or `rebase`; default `squash`), `poll`.
+  Never read from a target repo. (The unused `allow_infra_changes`/
   `allow_secret_access`/`require_label_or_command` flags were removed in v3.)
 - `.env` — PAT, webhook secret, commit identity, image refs, GHCR pull creds,
   paths, poll interval, plus `API_TOKEN` (Bearer gate for `/api/*`) and optional
@@ -406,8 +433,8 @@ uses the configured `container.network` and Codex has no Docker access.
   ephemeral tokenized remote.
 - PAT should be fine-grained and scoped to the allowlisted repos (a classic
   `repo` token can reach all your repos; the allowlist only gates *behavior*).
-- Invariants: never opens PRs, never merges, never deploys, never force-pushes
-  without intent. Open trade-off: bypassing Codex's sandbox means its shell has
+- Invariants: never opens PRs or merges without human confirmation, never
+  deploys, never force-pushes without intent. Open trade-off: bypassing Codex's sandbox means its shell has
   network + root *inside the container* (see §2.2).
 - v3 trade-off: the **app** now mounts the Docker socket (for `GET
   /api/containers`) and the data dir read-write (to serve/edit `TASK.md`). The

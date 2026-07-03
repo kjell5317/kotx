@@ -18,8 +18,10 @@ import type { NormalizedSubject } from "./extract.js";
 import {
   maybeResolveConflict,
   prMergeState,
+  proposeMergeForApprovedReview,
   reconcileTrackedPr,
   reconcileWaitingPrs,
+  scanTrackedPrConflicts,
   startDraft,
   startReview,
 } from "./pipeline.js";
@@ -55,6 +57,7 @@ export function startReconciler(): NodeJS.Timeout | null {
       try {
         await reconcileWaitingPrs(repo);
         await reconcileInReview(repo);
+        await scanTrackedPrConflicts(repo);
       } catch (err) {
         logger.error({ err, repo: repo.full_name }, "reconcile failed");
       }
@@ -95,6 +98,7 @@ async function pollRepo(repo: RepoConfig): Promise<void> {
   const steps: Array<[string, () => Promise<unknown>]> = [
     ["reconcileWaitingPrs", () => reconcileWaitingPrs(repo)],
     ["reconcileInReview", () => reconcileInReview(repo)],
+    ["scanTrackedPrConflicts", () => scanTrackedPrConflicts(repo)],
     ["pollIssues", () => pollIssues(octokit, owner, name, repo, me)],
     ["pollPulls", () => pollPulls(octokit, owner, name, repo, me)],
     ["pollComments", () => pollComments(octokit, owner, name, repo, me)],
@@ -390,12 +394,22 @@ async function pollPrReviewActivity(
         const fresh = await recordDelivery(`poll-pr-review-${r.id}`, "pull_request_review");
         if (!fresh) continue;
         const author = r.user?.login ?? "";
+        const reviewState = String(r.state ?? "").toLowerCase();
+        if (reviewState === "approved" && isAssignee) {
+          await proposeMergeForApprovedReview(repo, subject, {
+            state: reviewState,
+            body,
+            authorLogin: author,
+            htmlUrl: r.html_url ?? null,
+          });
+          continue;
+        }
         await handleItem(author, r.html_url ?? null, {
           body,
           authorLogin: author,
           htmlUrl: r.html_url ?? null,
           eventLabel: "review",
-          location: r.state ? `review: ${String(r.state).toLowerCase()}` : undefined,
+          location: r.state ? `review: ${reviewState}` : undefined,
         });
       }
 

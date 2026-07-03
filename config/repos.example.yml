@@ -5,4 +5,6 @@ repos:
     enabled: true
     default_branch: "main"
     assignee_login: "your-github-login"
+    # Optional: merge | squash | rebase. Defaults to squash.
+    merge_method: "squash"
     poll: false

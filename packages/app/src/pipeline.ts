@@ -1,3 +1,5 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   addRun,
   clearNotification,
@@ -5,6 +7,8 @@ import {
   createTaskWithRun,
   enqueueTask,
   findActiveTask,
+  findInReviewImplementTaskForPr,
+  findInReviewTasksTrackingAnyPr,
   findTasksTrackingPr,
   findTasksWaitingOnPr,
   findOpenPrTask,
@@ -12,15 +16,19 @@ import {
   hasReviewTask,
   getOctokit,
   isAgentComment,
+  isUniqueViolation,
   loadEnv,
   logger,
+  notify,
   setTaskPrAndState,
   setTaskState,
   setTaskTrigger,
   splitRepo,
+  taskDirFor,
   taskNotifyTag,
   type DraftFollowUpInput,
   type JobPhase,
+  type PullRequestReviewInput,
   type RepoConfig,
   type SubjectType,
   type Task,
@@ -234,8 +242,84 @@ async function isConflicting(repo: RepoConfig, prNumber: number): Promise<boolea
   return (await prMergeState(repo, prNumber)) === "dirty";
 }
 
+function logins(
+  arr: Array<{ login?: string | null } | null> | null | undefined,
+): string[] {
+  return (arr ?? [])
+    .map((x) => x?.login)
+    .filter((l): l is string => !!l);
+}
+
 function prCloseReason(prNumber: number): string {
   return `PR #${prNumber} was closed without merging`;
+}
+
+function trackedPrNumber(task: Task): number | null {
+  return task.pr_number ??
+    (task.subject_type === "pull_request" ? task.subject_number : null);
+}
+
+function mergeApprovalArtifact(input: {
+  review: PullRequestReviewInput;
+}): string {
+  const body = input.review.body.trim();
+  return `${body || "_No approval comment provided._"}\n`;
+}
+
+/** Move an in-review implement task back to human approval after PR approval. */
+export async function proposeMergeForApprovedReview(
+  repo: RepoConfig,
+  subject: NormalizedSubject,
+  review: PullRequestReviewInput,
+): Promise<IngestResult> {
+  if (subject.type !== "pull_request" || subject.state !== "open")
+    return { status: "ignored", reason: "not-open-pr" };
+  if (review.state !== "approved")
+    return { status: "ignored", reason: "review-not-approved" };
+  if (isAgentComment(review.body))
+    return { status: "ignored", reason: "agent-comment" };
+
+  const task = await findInReviewImplementTaskForPr(
+    repo.full_name,
+    subject.number,
+  );
+  if (!task) return { status: "ignored", reason: "no-in-review-task" };
+
+  const prNumber = trackedPrNumber(task);
+  if (!prNumber) return { status: "ignored", reason: "task-has-no-pr" };
+
+  const dir = taskDirFor(loadEnv().agentDataDir, task.id);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, "MERGE_APPROVAL.md"),
+    mergeApprovalArtifact({ review }),
+    "utf8",
+  );
+
+  try {
+    await setTaskTrigger(task.id, review.authorLogin, review.htmlUrl);
+    await setTaskState(task.id, "awaiting_approval");
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      logger.info(
+        { taskId: task.id, prNumber },
+        "merge proposal skipped because subject already has an active task",
+      );
+      return { status: "ignored", reason: "already-active-race" };
+    }
+    throw err;
+  }
+
+  await notify({
+    title: `PR #${prNumber} approved`,
+    message: "Confirm merge",
+    tag: taskNotifyTag(task.id),
+  }).catch(() => {});
+  logger.info(
+    { taskId: task.id, prNumber, reviewer: review.authorLogin },
+    "merge proposal created from approving review",
+  );
+  return { status: "handled", action: `merge-proposed:${task.id}` };
 }
 
 export async function markPrOpened(
@@ -333,6 +417,73 @@ export async function reconcileTrackedPr(
   return true;
 }
 
+/**
+ * Re-check every tracked in-review PR for conflicts. This complements the
+ * assignee-only polling path and webhook/default-branch events, so a PR that
+ * becomes dirty while it is already awaiting external review heals itself on a
+ * later periodic tick.
+ */
+export async function scanTrackedPrConflicts(
+  repo: RepoConfig,
+): Promise<IngestResult> {
+  const tasks = await findInReviewTasksTrackingAnyPr(repo.full_name);
+  if (tasks.length === 0)
+    return { status: "handled", action: "tracked-conflicts:0" };
+
+  const [owner, name] = splitRepo(repo.full_name);
+  const octokit: Octokit = getOctokit();
+  const seen = new Set<number>();
+  let enqueued = 0;
+  let unknown = 0;
+
+  for (const task of tasks) {
+    const prNumber = trackedPrNumber(task);
+    if (!prNumber || seen.has(prNumber)) continue;
+    seen.add(prNumber);
+
+    try {
+      const { data: pr } = await octokit.pulls.get({
+        owner,
+        repo: name,
+        pull_number: prNumber,
+      });
+      if (pr.state !== "open") continue;
+
+      const merge = await prMergeState(repo, prNumber);
+      if (merge === "unknown") {
+        unknown++;
+        continue;
+      }
+      if (merge !== "dirty") continue;
+
+      const subject: NormalizedSubject = {
+        type: "pull_request",
+        number: pr.number,
+        state: "open",
+        assignees: logins(pr.assignees),
+        requestedReviewers: logins(pr.requested_reviewers),
+        title: pr.title ?? "",
+        body: pr.body ?? "",
+        headRef: pr.head?.ref,
+        headRepoFullName: pr.head?.repo?.full_name ?? undefined,
+        baseRef: pr.base?.ref,
+      };
+      const res = await maybeResolveConflict(repo, subject, repo.assignee_login);
+      if (res.status === "enqueued") enqueued++;
+    } catch (err) {
+      logger.warn(
+        { err, repo: repo.full_name, prNumber },
+        "tracked conflict scan failed for PR",
+      );
+    }
+  }
+
+  return {
+    status: "handled",
+    action: `tracked-conflicts:${enqueued}:unknown:${unknown}`,
+  };
+}
+
 // ── ingestion ───────────────────────────────────────────────────────────────
 
 export async function ingest(n: Normalized): Promise<IngestResult> {
@@ -416,6 +567,15 @@ export async function ingest(n: Normalized): Promise<IngestResult> {
     return maybeResolveConflict(repo, subject, n.senderLogin);
   }
 
+  if (
+    n.event === "pull_request_review" &&
+    n.pullRequestReview?.state === "approved"
+  ) {
+    if (!subject.assignees.includes(me))
+      return { status: "ignored", reason: "not-assigned-to-me" };
+    return proposeMergeForApprovedReview(repo, subject, n.pullRequestReview);
+  }
+
   // Branch 1: a comment or review on an issue/PR I'm assigned to. A human
   // follow-up from the agent's own account still triggers; only the agent's own
   // posts (carrying the marker) are skipped to avoid a self-loop.
@@ -453,13 +613,13 @@ async function rescanConflicts(
   const prs = await octokit.pulls.list({ owner, repo: name, state: "open", per_page: 100 });
   let enqueued = 0;
   for (const pr of prs.data) {
-    const assignees = (pr.assignees ?? []).map((a) => a?.login).filter(Boolean);
+    const assignees = logins(pr.assignees);
     if (!assignees.includes(me)) continue;
     const subject: NormalizedSubject = {
       type: "pull_request",
       number: pr.number,
       state: "open",
-      assignees: assignees as string[],
+      assignees,
       requestedReviewers: [],
       title: pr.title ?? "",
       body: pr.body ?? "",

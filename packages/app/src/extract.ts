@@ -1,4 +1,8 @@
-import type { DraftFollowUpInput, SubjectType } from "@kotx/shared";
+import type {
+  DraftFollowUpInput,
+  PullRequestReviewInput,
+  SubjectType,
+} from "@kotx/shared";
 
 export interface NormalizedSubject {
   type: SubjectType;
@@ -26,6 +30,7 @@ export interface Normalized {
   // review_requested) — lets us check it's me without re-listing.
   targetLogin?: string;
   comment?: DraftFollowUpInput;
+  pullRequestReview?: PullRequestReviewInput;
   // push events: the fully-qualified ref that was pushed (refs/heads/<branch>).
   pushRef?: string;
 }
@@ -106,6 +111,12 @@ export function normalize(event: string, payload: any): Normalized | null {
       return {
         ...base,
         subject: subjectFromPull(payload.pull_request),
+        pullRequestReview: {
+          state: String(payload.review?.state ?? "").toLowerCase(),
+          body: payload.review?.body ?? "",
+          authorLogin: payload.review?.user?.login ?? "",
+          htmlUrl: payload.review?.html_url ?? null,
+        },
         comment: {
           body: payload.review?.body ?? "",
           authorLogin: payload.review?.user?.login ?? "",
