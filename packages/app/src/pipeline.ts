@@ -8,6 +8,7 @@ import {
   enqueueTask,
   findActiveTask,
   findInReviewImplementTaskForPr,
+  findInReviewTasksTrackingAnyPr,
   findTasksTrackingPr,
   findTasksWaitingOnPr,
   findOpenPrTask,
@@ -241,6 +242,14 @@ async function isConflicting(repo: RepoConfig, prNumber: number): Promise<boolea
   return (await prMergeState(repo, prNumber)) === "dirty";
 }
 
+function logins(
+  arr: Array<{ login?: string | null } | null> | null | undefined,
+): string[] {
+  return (arr ?? [])
+    .map((x) => x?.login)
+    .filter((l): l is string => !!l);
+}
+
 function prCloseReason(prNumber: number): string {
   return `PR #${prNumber} was closed without merging`;
 }
@@ -408,6 +417,73 @@ export async function reconcileTrackedPr(
   return true;
 }
 
+/**
+ * Re-check every tracked in-review PR for conflicts. This complements the
+ * assignee-only polling path and webhook/default-branch events, so a PR that
+ * becomes dirty while it is already awaiting external review heals itself on a
+ * later periodic tick.
+ */
+export async function scanTrackedPrConflicts(
+  repo: RepoConfig,
+): Promise<IngestResult> {
+  const tasks = await findInReviewTasksTrackingAnyPr(repo.full_name);
+  if (tasks.length === 0)
+    return { status: "handled", action: "tracked-conflicts:0" };
+
+  const [owner, name] = splitRepo(repo.full_name);
+  const octokit: Octokit = getOctokit();
+  const seen = new Set<number>();
+  let enqueued = 0;
+  let unknown = 0;
+
+  for (const task of tasks) {
+    const prNumber = trackedPrNumber(task);
+    if (!prNumber || seen.has(prNumber)) continue;
+    seen.add(prNumber);
+
+    try {
+      const { data: pr } = await octokit.pulls.get({
+        owner,
+        repo: name,
+        pull_number: prNumber,
+      });
+      if (pr.state !== "open") continue;
+
+      const merge = await prMergeState(repo, prNumber);
+      if (merge === "unknown") {
+        unknown++;
+        continue;
+      }
+      if (merge !== "dirty") continue;
+
+      const subject: NormalizedSubject = {
+        type: "pull_request",
+        number: pr.number,
+        state: "open",
+        assignees: logins(pr.assignees),
+        requestedReviewers: logins(pr.requested_reviewers),
+        title: pr.title ?? "",
+        body: pr.body ?? "",
+        headRef: pr.head?.ref,
+        headRepoFullName: pr.head?.repo?.full_name ?? undefined,
+        baseRef: pr.base?.ref,
+      };
+      const res = await maybeResolveConflict(repo, subject, repo.assignee_login);
+      if (res.status === "enqueued") enqueued++;
+    } catch (err) {
+      logger.warn(
+        { err, repo: repo.full_name, prNumber },
+        "tracked conflict scan failed for PR",
+      );
+    }
+  }
+
+  return {
+    status: "handled",
+    action: `tracked-conflicts:${enqueued}:unknown:${unknown}`,
+  };
+}
+
 // ── ingestion ───────────────────────────────────────────────────────────────
 
 export async function ingest(n: Normalized): Promise<IngestResult> {
@@ -537,13 +613,13 @@ async function rescanConflicts(
   const prs = await octokit.pulls.list({ owner, repo: name, state: "open", per_page: 100 });
   let enqueued = 0;
   for (const pr of prs.data) {
-    const assignees = (pr.assignees ?? []).map((a) => a?.login).filter(Boolean);
+    const assignees = logins(pr.assignees);
     if (!assignees.includes(me)) continue;
     const subject: NormalizedSubject = {
       type: "pull_request",
       number: pr.number,
       state: "open",
-      assignees: assignees as string[],
+      assignees,
       requestedReviewers: [],
       title: pr.title ?? "",
       body: pr.body ?? "",

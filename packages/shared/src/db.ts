@@ -485,6 +485,23 @@ export async function findTasksTrackingAnyPr(repoFullName: string): Promise<Task
   return res.rows;
 }
 
+export async function findInReviewTasksTrackingAnyPr(
+  repoFullName: string,
+): Promise<Task[]> {
+  const res = await getPool().query<Task>(
+    `SELECT * FROM tasks
+     WHERE repo_full_name = $1
+       AND state = 'awaiting_external'
+       AND (
+         pr_number IS NOT NULL
+         OR subject_type = 'pull_request'
+       )
+     ORDER BY updated_at DESC, id DESC`,
+    [repoFullName],
+  );
+  return res.rows;
+}
+
 /**
  * Move a subject's active tasks to a terminal state — e.g. when its PR is
  * merged/closed (Branch lifecycle). Only touches non-terminal rows.

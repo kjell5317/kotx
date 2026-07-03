@@ -25,11 +25,13 @@ Triggers are plain GitHub events (or polling) keyed to your role on the subject
    approval comment saved as `MERGE_APPROVAL.md`; the approver and review URL are
    exposed by the merge proposal API from task trigger metadata. Confirming the
    merge merges the PR on GitHub and marks the task done.
-2. **Conflict (Branch 2)** — a PR assigned to you is unmergeable (`mergeable_state
-   = dirty`), detected on `pull_request` synchronize/open or a `push` to the
-   default branch. Codex resolves the in-progress merge automatically (no
-   approval), pushes, and marks that conflict task done. Any underlying
-   implement/PR task tracks review and merge progress.
+2. **Conflict (Branch 2)** — a PR assigned to you, or a PR already tracked as in
+   review, is unmergeable (`mergeable_state = dirty`). Conflicts are detected on
+   `pull_request` synchronize/open, on a `push` to the default branch, and by a
+   periodic scan of tracked in-review PRs. Codex resolves the in-progress merge
+   automatically (no approval), pushes, and marks that conflict task done. Any
+   underlying implement/PR task tracks review and merge progress, so the same PR
+   can enqueue a later conflict task after a prior resolve task has finished.
 3. **Review (Branch 3)** — your review is requested on a PR, or such a PR gets new
    commits. A read-only review run writes `REVIEW.md`; the task waits in
    `awaiting_approval`. `POST …/approve` submits an approving PR review using
@@ -159,7 +161,9 @@ The agent therefore acts as **me**. No GitHub App, no installation tokens.
 ### 5.2 Two input modes (per repo)
 - **Webhook** (`poll: false`): a repo webhook → `/github/webhook`, HMAC-verified.
   Subscribe to **issues, pull_request, pull_request_review, issue_comment,
-  pull_request_review_comment, push**.
+  pull_request_review_comment, push**. A periodic reconciler still runs for
+  webhook-only repos to catch missed PR lifecycle events and recheck tracked
+  in-review PRs for conflicts.
 - **Polling** (`poll: true`): the app polls every `POLL_INTERVAL_SEC` for repos
   where I can't register a webhook. It diffs GitHub state against existing tasks
   to find new assignments, review requests, conflicts, and follow-up comments or
@@ -168,8 +172,9 @@ The agent therefore acts as **me**. No GitHub App, no installation tokens.
   a reviewed PR re-reviews when its head advances past the stored
   `reviewed_head_sha` (poll-mode stand-in for `synchronize`) or when a new
   comment/review lands on it; follow-ups arrive via cursors and
-  `github_deliveries` de-dupe; conflict checks self-limit (only fire when the PR
-  is dirty and has no active task).
+  `github_deliveries` de-dupe; tracked in-review PRs are also rechecked for
+  conflicts each tick. Conflict checks self-limit (only fire when the PR is dirty
+  and has no active task).
 
 ### 5.3 Triggers (no labels, no commands)
 All labels (`agent:*`) and `/agent` commands were **removed** in v3. Triggers are
@@ -185,7 +190,8 @@ the three role-aware workflows in §0, driven by webhook events:
   review task rather than requested-reviewer membership (GitHub drops me from
   requested reviewers once I've reviewed).
 - `pull_request` synchronize/open + `push` to the default branch, for PRs assigned
-  to me → Branch 2 (only when `mergeable_state = dirty`).
+  to me, and the periodic tracked in-review PR scan → Branch 2 (only when
+  `mergeable_state = dirty`).
 - `pull_request` opened/reopened from a pushed issue branch → record the PR and
   show the task as in review.
 - `pull_request_review` approved on an assigned PR → find the existing
@@ -196,8 +202,9 @@ the three role-aware workflows in §0, driven by webhook events:
   task exists, ignore the approval.
 - `pull_request` closed → close tracked open tasks as `done` when merged or
   `cancelled` with a reason when closed unmerged.
-- Polling performs the same PR-open and PR-closed reconciliation, so lifecycle
-  state does not depend on receiving every webhook.
+- Polling and the webhook-only reconciler perform the same PR-open and PR-closed
+  reconciliation, plus the tracked in-review conflict scan, so lifecycle and
+  conflict recovery do not depend on receiving every webhook.
 
 ### 5.4 Eligibility
 Repo allowlisted + enabled; subject open; my role on the subject matches the

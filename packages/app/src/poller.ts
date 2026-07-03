@@ -21,6 +21,7 @@ import {
   proposeMergeForApprovedReview,
   reconcileTrackedPr,
   reconcileWaitingPrs,
+  scanTrackedPrConflicts,
   startDraft,
   startReview,
 } from "./pipeline.js";
@@ -56,6 +57,7 @@ export function startReconciler(): NodeJS.Timeout | null {
       try {
         await reconcileWaitingPrs(repo);
         await reconcileInReview(repo);
+        await scanTrackedPrConflicts(repo);
       } catch (err) {
         logger.error({ err, repo: repo.full_name }, "reconcile failed");
       }
@@ -92,6 +94,7 @@ async function pollRepo(repo: RepoConfig): Promise<void> {
   const me = repo.assignee_login;
   await reconcileWaitingPrs(repo);
   await reconcileInReview(repo);
+  await scanTrackedPrConflicts(repo);
   await pollIssues(octokit, owner, name, repo, me);
   await pollPulls(octokit, owner, name, repo, me);
   await pollComments(octokit, owner, name, repo, me);
