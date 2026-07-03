@@ -17,9 +17,11 @@ See [SPEC.md](SPEC.md) for the full design and the decisions behind it.
    post a summary comment. First drafts use the issue/PR body and discussion;
    follow-up drafts revise the reviewed `TASK.md` from the prior run using the
    latest triggering comment or review as the new input.
-2. **Conflict** — a PR assigned to you becomes unmergeable. Codex resolves the
-   conflicts automatically (no approval), pushes the merge, and marks that
-   conflict task done.
+2. **Conflict** — a PR assigned to you, or a PR already tracked as in review,
+   becomes unmergeable. Codex resolves the conflicts automatically (no
+   approval), pushes the merge, and marks that conflict task done. Tracked
+   in-review PRs are rechecked periodically, so a later conflict can enqueue a
+   fresh resolve task after an earlier one has finished.
 3. **Review** — your review is requested on a PR (or such a PR gets new commits).
    Codex does a **read-only** review and writes `REVIEW.md`. You approve it in the
    frontend; only then is it posted as a PR review/comment and marked done.
@@ -121,6 +123,8 @@ For webhook mode, add a per-repo webhook in GitHub repo Settings -> Webhooks:
 - Events: `issues`, `pull_request`, `pull_request_review`, `issue_comment`, `pull_request_review_comment`, and `push`
 
 For repos where you cannot add webhooks, set `poll: true` in `config/repos.yml`.
+Webhook-only repos still run a lightweight reconciler that catches missed PR
+lifecycle events and periodically rechecks tracked in-review PRs for conflicts.
 
 Start the services:
 
