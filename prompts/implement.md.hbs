@@ -40,7 +40,10 @@ part of your work — leave no `<<<<<<<`/`=======`/`>>>>>>>` markers behind:
   whatever helps. This container is your sandbox.
 - Network access is available and you run as root: install whatever the project
   needs (`uv`, `pip`, `npm`/`pnpm`/`yarn`, or system packages via `apt-get`).
-  Node and Python 3 (with `uv`) are preinstalled.
+  Node and Python 3 (with `uv`) are preinstalled. Playwright's Chromium and its
+  system libraries are also preinstalled (shared browser cache at
+  `PLAYWRIGHT_BROWSERS_PATH`); if the project pins a different Playwright
+  version or needs Firefox/WebKit, `npx playwright install <browser>` works.
 {{#if dockerAvailable}}
 - Docker is available via a private per-run daemon. You may `docker run`
   throwaway services for tests (e.g. a database): publish a port and reach it

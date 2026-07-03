@@ -41,7 +41,8 @@ working tree** for you to resolve.
 ## Working agreement
 
 - Work in `/workspace`. You may run any commands (build, tests, package managers).
-  Network + root are available; Node and Python 3 (with `uv`) are preinstalled.
+  Network + root are available; Node and Python 3 (with `uv`) are preinstalled,
+  as are Playwright's Chromium and its system libraries.
 {{#if dockerAvailable}}
 - Docker is available via a private per-run daemon (`docker run …`); services are
   reachable at host `dind` and are destroyed when the run ends.

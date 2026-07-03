@@ -196,6 +196,10 @@ export async function runCodexContainer(opts: {
         NetworkMode: network,
         NanoCpus: Math.floor(c.cpus * 1e9),
         Memory: parseMemory(c.memory),
+        // Docker's 64MB /dev/shm default crashes headless Chromium under load
+        // (Playwright/puppeteer runs in projects' test suites); counts toward
+        // the container memory limit, so this is a cap, not a reservation.
+        ShmSize: 1024 * 1024 * 1024,
         AutoRemove: false,
         CapDrop: ["ALL"],
         SecurityOpt: ["no-new-privileges"],
