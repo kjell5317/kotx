@@ -2,6 +2,8 @@ export * from "./types.js";
 export * from "./schemas.js";
 export * from "./config.js";
 export * from "./db.js";
+export * from "./dto.js";
+export * from "./webhook.js";
 export * from "./github.js";
 export * from "./notify.js";
 export * from "./queue.js";

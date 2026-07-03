@@ -421,12 +421,15 @@ uses the configured `container.network` and Codex has no Docker access.
   defaults to `disabled`).
 - `config/repos.yml` — operator-owned allowlist; per repo: `enabled`,
   `default_branch`, `assignee_login` (my login — also the review-request login),
-  `merge_method` (`merge`, `squash`, or `rebase`; default `squash`), `poll`.
+  `aliases` (friendly names accepted by `POST /api/runs` and served by
+  `GET /api/repos`; default none), `merge_method` (`merge`, `squash`, or
+  `rebase`; default `squash`), `poll`.
   Never read from a target repo. (The unused `allow_infra_changes`/
   `allow_secret_access`/`require_label_or_command` flags were removed in v3.)
 - `.env` — PAT, webhook secret, commit identity, image refs, GHCR pull creds,
-  paths, poll interval, plus `API_TOKEN` (Bearer gate for `/api/*`) and optional
-  `CORS_ORIGIN` for the browser frontend.
+  paths, poll interval, plus `API_TOKEN` (Bearer gate for `/api/*`), optional
+  `CORS_ORIGIN` for the browser frontend, and optional `WEBHOOK_URL`/
+  `WEBHOOK_SECRET` for the outbound state-transition webhook (§12.1).
 
 ---
 
@@ -442,10 +445,11 @@ uses the configured `container.network` and Codex has no Docker access.
 - Invariants: never opens PRs or merges without human confirmation, never
   deploys, never force-pushes without intent. Open trade-off: bypassing Codex's sandbox means its shell has
   network + root *inside the container* (see §2.2).
-- v3 trade-off: the **app** now mounts the Docker socket (for `GET
-  /api/containers`) and the data dir read-write (to serve/edit `TASK.md`). The
-  socket is read-only in intent (list/inspect) but is still host-level access;
-  acceptable for a single-user personal tool, behind the `API_TOKEN` gate.
+- v3 trade-off: the **app** mounts the data dir read-write (to serve/edit
+  `TASK.md`); acceptable for a single-user personal tool, behind the
+  `API_TOKEN` gate. (It briefly also mounted the Docker socket for
+  `GET /api/containers`; that endpoint and the mount were removed in the
+  runs/tasks consolidation — only the worker touches Docker.)
 - Dev-container trade-off (`container.dev_containers`): the runner still gets **no
   host socket**; Codex's Docker access targets a per-run **privileged** `docker:dind`
   sidecar isolated on a private network with no host mounts (§9.1). The sidecar is
@@ -461,17 +465,28 @@ uses the configured `container.network` and Codex has no Docker access.
 
 `/api/*` is gated by `Authorization: Bearer $API_TOKEN` (timing-safe compare;
 503 if `API_TOKEN` is unset). `CORS_ORIGIN` enables the browser frontend.
-Endpoints: `GET /api/tasks?scope=active|all`, `GET /api/tasks/:id`,
+Endpoints: `GET /api/repos` (the enabled allowlist with `aliases`),
+`GET /api/tasks?scope=active|all` (plus `updatedSince=<ISO>` for
+webhook-miss reconciliation — returns terminal tasks too), `GET /api/tasks/:id`,
 `POST /api/runs` (manual `implement`/`review`/`resolve` by GitHub issue/PR
 number, or create and assign a new GitHub issue when no number is supplied;
-optional `repo` accepts full names plus the `Social Ai` and `CSEE` aliases),
+optional `repo` accepts full names plus the per-repo `aliases` from
+`config/repos.yml`),
 `GET|PUT /api/tasks/:id/task`, `GET|PUT /api/tasks/:id/review`,
-`GET /api/tasks/:id/prompt` (the exact Codex prompt) and `…/log` (a JSON page
-of the latest run transcript, newest 200 JSONL entries by default; `limit`
-1..1000 and `before` byte cursor for older pages),
-`POST /api/tasks/:id/{start,approve,comment,discard}`,
-`GET /api/containers`. `discard` moves a task of any kind to `cancelled` with a
-discard reason. See [API.md](API.md) for the table.
+`GET|PUT /api/tasks/:id/pr`, `GET /api/tasks/:id/merge/context`,
+`POST /api/tasks/:id/{start,approve,comment,merge,discard}`.
+`discard` moves a task of any kind to `cancelled` with a discard reason. The
+document endpoints (`…/task`, `…/review`, `…/pr`) keep serving their artifacts
+after terminal states (they're indexed externally). Repeat triggers on a
+`(repo, subjectNumber, kind)` tuple refresh the existing non-terminal task
+instead of creating a second row. When `WEBHOOK_URL`/`WEBHOOK_SECRET` are set,
+every task state change POSTs a `task.state_changed` payload (full task DTO,
+HMAC-SHA256-signed as `X-Kotx-Signature`) with bounded retries; consumers treat
+deliveries as unordered upserts. External frontends deep-link tasks via the
+consolidated `#task/<frontendTaskId>` modal; links kotx emits use the
+`#run/<kotxTaskId>` alias, which the frontend redirects to the adopting task.
+(Removed in the consolidation: `GET /api/tasks/:id/prompt`, `…/log`, raw
+`GET …/merge`, and `GET /api/containers`.) See [API.md](API.md) for the table.
 
 ---
 

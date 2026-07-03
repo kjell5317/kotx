@@ -9,9 +9,11 @@ workflows (see [SPEC.md](SPEC.md) §0). Served by the `app` service.
 - **Auth**: every `/api/*` request needs `Authorization: Bearer $API_TOKEN`.
   Missing/blank token → `401`; if the server has no `API_TOKEN` set → `503`.
 - **CORS**: set `CORS_ORIGIN` to your frontend's origin to allow browser calls.
-- **Content types**: list/detail, `…/merge/context`, and `…/log` endpoints
-  return JSON; the `…/task`, `…/review`, and `…/merge` endpoints return
-  `text/markdown`.
+- **Content types**: list/detail, `/api/repos`, and `…/merge/context` return
+  JSON; the `…/task` and `…/review` endpoints return `text/markdown`.
+- **Push**: set `WEBHOOK_URL`/`WEBHOOK_SECRET` to receive every task state
+  change as a signed webhook (see [State-transition webhook](#state-transition-webhook))
+  instead of tight polling.
 
 ```bash
 curl -H "Authorization: Bearer $API_TOKEN" \
@@ -23,8 +25,10 @@ curl -H "Authorization: Bearer $API_TOKEN" \
 | Method & path | Returns / does |
 | --- | --- |
 | `GET /healthz` | `{ ok: true }` — unauthenticated liveness check |
-| `POST /api/runs` | manually start work. With `{ "type": "implement" \| "review" \| "resolve", "number": 123, "repo"?: "owner/name" }`, enqueue an existing GitHub issue/PR. With `{ "repo"?: "owner/name", "title": "...", "body"?: "..." }`, create a new issue, assign it to the repo's configured assignee, and let the normal assignment path draft it. `repo` accepts full names plus the aliases `Social Ai` and `CSEE` |
+| `POST /api/runs` | manually start work. With `{ "type": "implement" \| "review" \| "resolve", "number": 123, "repo"?: "owner/name" }`, enqueue an existing GitHub issue/PR. With `{ "repo"?: "owner/name", "title": "...", "body"?: "..." }`, create a new issue, assign it to the repo's configured assignee, and let the normal assignment path draft it. `repo` accepts full names plus the per-repo `aliases` from `config/repos.yml` (see `GET /api/repos`) |
+| `GET /api/repos` | the enabled repo allowlist: `[{ fullName, aliases, assignee, mergeMethod }]` — cheap and static, straight from `config/repos.yml` |
 | `GET /api/tasks?scope=active\|all` | array of tasks where I'm assignee or reviewer. `active` (default) = non-terminal only; `all` = everything |
+| `GET /api/tasks?updatedSince=<ISO>` | reconciliation mode: every task — **terminal ones included**, regardless of `scope` — whose `updatedAt` is at or after the timestamp. The polling fallback for missed webhooks |
 | `GET /api/tasks/:id` | one task object |
 | `GET /api/tasks/:id/task` | the `TASK.md` brief (markdown). `404` if not generated yet |
 | `PUT /api/tasks/:id/task` | overwrite the brief before starting. Only allowed while `state = draft`. Body: raw markdown, or JSON `{ "content": "…" }` |
@@ -34,14 +38,21 @@ curl -H "Authorization: Bearer $API_TOKEN" \
 | `POST /api/tasks/:id/comment` | **Branch 3** (`kind = review`): post non-empty `REVIEW.md` as a plain PR comment. Empty or whitespace-only review text is rejected. Only valid from `state = awaiting_approval` → `awaiting_external` |
 | `GET /api/tasks/:id/pr` | **Branch 1**: the proposed PR as JSON `{ title, body }`. `404` if there's no proposal |
 | `PUT /api/tasks/:id/pr` | edit the proposed PR title/description before approving. Only allowed while `kind = implement` and `state = awaiting_approval`. Body: JSON `{ "title"?: "…", "body"?: "…" }` (send either or both) |
-| `GET /api/tasks/:id/merge` | **Branch 1**: the pending merge proposal approval comment (`MERGE_APPROVAL.md`, markdown). `404` if there's no merge proposal |
-| `GET /api/tasks/:id/merge/context` | **Branch 1**: structured merge proposal context as JSON `{ prNumber, approvedBy, reviewUrl, commentMarkdown }`. `approvedBy` and `reviewUrl` come from the approving PR review metadata, while `commentMarkdown` is the same approval comment returned by `GET …/merge`. `404` if there's no merge proposal; `409` if the task is not awaiting merge confirmation |
+| `GET /api/tasks/:id/merge/context` | **Branch 1**: structured merge proposal context as JSON `{ prNumber, approvedBy, reviewUrl, commentMarkdown }`. `approvedBy` and `reviewUrl` come from the approving PR review metadata, while `commentMarkdown` is the approval comment (`MERGE_APPROVAL.md`). `404` if there's no merge proposal; `409` if the task is not awaiting merge confirmation |
 | `POST /api/tasks/:id/merge` | **Branch 1**: confirm the merge proposal. Merges the tracked PR using the repo's configured `merge_method` (`squash` by default), marks the task `done`, and clears its notification. `409` if the task has no tracked PR or GitHub says the PR is missing/not mergeable |
-| `GET /api/tasks/:id/prompt` | the exact prompt piped into Codex on the latest run (markdown). `404` until a run has started |
-| `GET /api/tasks/:id/log` | a bounded JSON page of the latest run's Codex transcript. Defaults to the newest 50 JSONL entries; `404` until a log exists |
 | `POST /api/tasks/:id/approve` | approve the proposal (see `proposes`). **Branch 3** (`kind = review`): submit an approving PR review using `REVIEW.md` as the body; if the trimmed review is empty, the approval has no body. **Branch 1 PR opening** (`kind = implement`, no tracked PR): merge the default branch into the pushed branch and open the proposed PR (returns `{ ok, prNumber, prUrl }`), then mark it `awaiting_external`. **Branch 1 merge** (`kind = implement`, tracked PR): same as `POST …/merge`. Only valid from `state = awaiting_approval` |
 | `POST /api/tasks/:id/discard` | dismiss a task of any kind from the active list → `state = cancelled`, with `stateReason = "discarded from the API"`. Also signals cancel. `409` if already terminal |
-| `GET /api/containers` | live `docker ps` of the running codex runners |
+
+The document endpoints (`GET …/task`, `GET …/review`, `GET …/pr`) keep serving
+their last content after a task reaches a terminal state (`done` / `failed` /
+`cancelled`) — the artifacts live in a per-task directory that garbage
+collection never touches, so consumers can (re-)index them at any time.
+
+> Removed in the runs/tasks consolidation (their only client no longer uses
+> them): `GET /api/tasks/:id/prompt`, `GET /api/tasks/:id/log` (and its
+> pagination), `GET /api/tasks/:id/merge` (raw markdown — use
+> `GET …/merge/context`), and `GET /api/containers` (the app no longer mounts
+> the Docker socket).
 
 Mutating endpoints return `{ ok: true }` on success. Errors return
 `{ "error": "…" }` with a `4xx`/`503` status (`409` = wrong state for the action).
@@ -116,56 +127,51 @@ Successful issue creation returns:
 inferred). When more than one repo is enabled, `repo` is **required** — omitting
 it returns `409` with the list of enabled repos. A `repo` that isn't in the
 enabled allowlist returns `409`. Full repo names continue to work, with simple
-whitespace and trailing slashes normalized. The friendly aliases `Social Ai` and
-`CSEE` resolve to `TUM-Social-AI/AflaConnect` and
-`askLio/CSEE-strategic-negotiation-agent` before allowlist validation.
+whitespace and trailing slashes normalized. Each repo's `aliases` from
+`config/repos.yml` (as returned by `GET /api/repos`) resolve to its full name
+before allowlist validation, matched case- and whitespace-insensitively.
 
 With zero enabled repos it returns `409`. Missing GitHub numbers return `404`;
 closed subjects, plain issues for `review`/`resolve`, mergeable PRs for
 `resolve`, and active-task conflicts return `409` with the pipeline `reason`.
 GitHub create, assignment, and lookup failures return `500`.
 
-## Log pagination
+## One task per subject and kind
 
-`GET /api/tasks/:id/log` reads `codex.jsonl` from the task's latest run and
-returns a JSON object instead of the raw NDJSON file. By default it returns the
-newest 50 complete JSONL lines without loading the full log into memory.
+While a **non-terminal** task exists for a `(repo, subjectNumber, kind)` tuple,
+any further trigger for the same tuple — a repeated review request, a follow-up
+comment on an assigned issue/PR, a manual `POST /api/runs` — updates/refreshes
+that task (and fires the state-transition webhook) instead of creating a new
+row. In-flight drafts and pending reviews are re-run with the new input; a task
+that is running or waiting on its PR just records the new trigger. A new task
+for the same subject and kind is only created after the previous one is
+terminal. Consumers can therefore key their own bookkeeping on
+`repo` + `subjectNumber` + `kind` and treat every update as an upsert.
 
-Query parameters:
+## State-transition webhook
 
-| Parameter | Meaning |
-| --- | --- |
-| `limit` | Number of JSONL lines to return. Default `50`, maximum `1000`. Values outside `1..1000` return `400`. |
-| `before` | Optional byte cursor. Return the newest `limit` lines ending before this offset. Use `page.nextBefore` from the previous response to page older. Must be a non-negative integer, cannot exceed the current log size, and must point to a line boundary unless it equals the end of the file. |
-
-Response shape:
+Set `WEBHOOK_URL` and `WEBHOOK_SECRET` in the environment to have every task
+state change POSTed to that URL:
 
 ```jsonc
 {
-  "runId": 123,
-  "entries": [
-    { "offset": 77120, "record": { "type": "event", "message": "..." } },
-    { "offset": 77308, "raw": "not json", "parseError": "Unexpected token ..." }
-  ],
-  "page": {
-    "limit": 200,
-    "count": 2,
-    "startOffset": 77120,
-    "endOffset": 77488,
-    "sizeBytes": 77488,
-    "hasMoreBefore": true,
-    "hasMoreAfter": false,
-    "nextBefore": 77120
-  }
+  "event": "task.state_changed",
+  "previousState": "drafting",     // null when the task was just created
+  "task": { /* the full task object, same shape as GET /api/tasks/:id */ },
+  "occurredAt": "2026-07-03T10:00:00.000Z"
 }
 ```
 
-To fetch older entries:
-
-```bash
-curl -H "Authorization: Bearer $TOKEN" \
-  "https://agent.example.com/api/tasks/21/log?limit=200&before=77120"
-```
+- The raw request body is signed with HMAC-SHA256 using `WEBHOOK_SECRET` and
+  sent as `X-Kotx-Signature: sha256=<hex>` — verify before parsing.
+- Fires for **all** kinds (filter `resolve_conflict` client-side if you don't
+  surface it) and **all** transitions, terminal ones included, plus follow-up
+  refreshes of an existing task.
+- Delivery is at-least-once, unordered, best-effort: non-2xx responses are
+  retried a handful of times with backoff, then dropped. `task` always carries
+  the task's state at delivery time, so treat each delivery as an upsert and
+  reconcile misses with `GET /api/tasks?updatedSince=…` (e.g. on startup and on
+  a slow loop).
 
 ## The task object
 
@@ -206,8 +212,8 @@ When `canApprove` is true, `proposes` says what the approve button does: `"revie
 submits an approving PR review with `REVIEW.md` as the body (fetch via
 `GET …/review`), `"pr"` opens the proposed PR (fetch via `GET …/pr`), and
 `"merge"` merges the tracked PR (fetch approver identity, review URL, and the
-approval comment via `GET …/merge/context`; `GET …/merge` remains available for
-raw markdown clients; `POST …/merge` is the explicit confirmation endpoint). When
+approval comment via `GET …/merge/context`; `POST …/merge` is the explicit
+confirmation endpoint). When
 `canComment` is true, `POST …/comment` posts the same `REVIEW.md` as a plain PR
 comment instead of approving the PR; it is rejected if the saved review is empty
 or whitespace-only.
@@ -223,23 +229,10 @@ or whitespace-only.
 | `in review` | a relevant PR is known; waiting for it to merge or close |
 | `done` / `failed` / `cancelled` | terminal (excluded from `scope=active`). Timeouts are `failed` with `stateReason = "the run timed out"`; discarded tasks are `cancelled` with a discard reason |
 
-## The container object (`GET /api/containers`)
-
-```jsonc
-{
-  "id": "a1b2c3d4e5f6",
-  "name": "codex-task-42",
-  "runId": 42,
-  "image": "ghcr.io/your-github-owner/kotx-runner:latest",
-  "state": "running",
-  "status": "Up 2 minutes",
-  "createdAt": 1751277600         // unix seconds
-}
-```
-
 ## Typical flows
 
-- **Branch 1 (task)**: poll `GET /api/tasks` → open one with `canStart` →
+- **Branch 1 (task)**: watch the webhook (or poll `GET /api/tasks`) → open a
+  task with `canStart` →
   `GET …/task` (optionally `PUT …/task` to tweak) → `POST …/start` → it moves to
   `running`, then comes back with `canApprove` and `proposes = "pr"`. Review the
   proposed PR via `GET …/pr` (optionally `PUT …/pr` to edit the title/body) →

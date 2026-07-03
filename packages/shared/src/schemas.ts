@@ -57,6 +57,9 @@ export const repoConfigSchema = z.object({
   enabled: z.boolean(),
   default_branch: z.string().default("main"),
   assignee_login: z.string(),
+  // Friendly names accepted by POST /api/runs `repo` and surfaced by
+  // GET /api/repos so clients can route without hardcoding them.
+  aliases: z.array(z.string()).default([]),
   merge_method: pullRequestMergeMethodSchema.default("squash"),
   // true = poll this repo (no webhook rights); false = rely on webhooks.
   // The poller diffs GitHub state against existing tasks to find new triggers

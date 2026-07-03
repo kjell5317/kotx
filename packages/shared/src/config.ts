@@ -46,6 +46,11 @@ export interface Env {
   // Allowed CORS origin for the external frontend (e.g. https://app.example.com).
   // Unset = no CORS headers (same-origin / non-browser clients only).
   corsOrigin?: string;
+  // Outbound state-transition webhook (e.g. https://007.example.com/inputs/kotx/webhook).
+  // Every task state change POSTs there, HMAC-signed with webhookSecret.
+  // Unset = webhooks disabled. Setting the URL without a secret is a startup error.
+  webhookUrl?: string;
+  webhookSecret?: string;
 }
 
 let cachedEnv: Env | undefined;
@@ -69,7 +74,14 @@ export function loadEnv(): Env {
     configDir: process.env.CONFIG_DIR ?? "./config",
     apiToken: process.env.API_TOKEN || undefined,
     corsOrigin: process.env.CORS_ORIGIN || undefined,
+    webhookUrl: process.env.WEBHOOK_URL || undefined,
+    webhookSecret: process.env.WEBHOOK_SECRET || undefined,
   };
+  // The consumer verifies the HMAC before parsing, so an unsigned webhook is
+  // useless — fail fast instead of silently sending deliveries that get dropped.
+  if (cachedEnv.webhookUrl && !cachedEnv.webhookSecret) {
+    throw new Error("WEBHOOK_URL is set but WEBHOOK_SECRET is missing");
+  }
   return cachedEnv;
 }
 

@@ -52,18 +52,25 @@ All `/api/*` routes require `Authorization: Bearer $API_TOKEN`.
 
 | Method & path | Purpose |
 | --- | --- |
-| `POST /api/runs` | manually enqueue `implement`, `review`, or `resolve` for an existing GitHub issue/PR number, or create and assign a new issue when no number is supplied. `repo` accepts full names plus `Social Ai` and `CSEE` aliases |
+| `POST /api/runs` | manually enqueue `implement`, `review`, or `resolve` for an existing GitHub issue/PR number, or create and assign a new issue when no number is supplied. `repo` accepts full names plus the per-repo `aliases` from `config/repos.yml` |
+| `GET /api/repos` | the enabled repo allowlist (`fullName`, `aliases`, `assignee`, `mergeMethod`) |
 | `GET /api/tasks?scope=active\|all` | tasks where you're assignee or reviewer, with `status` (e.g. *awaiting approval*, *in review*) |
+| `GET /api/tasks?updatedSince=<ISO>` | every task (terminal included) updated at/after the timestamp — reconciliation for missed webhooks |
 | `GET /api/tasks/:id` | one task |
 | `GET /api/tasks/:id/task` | the `TASK.md` brief |
 | `PUT /api/tasks/:id/task` | edit the brief before starting (draft state only) |
 | `POST /api/tasks/:id/start` | start the implementation (Branch 1, draft → queued) |
 | `GET /api/tasks/:id/review` | the `REVIEW.md` |
-| `GET /api/tasks/:id/merge` | the pending merge proposal, when a tracked PR was approved |
+| `GET /api/tasks/:id/merge/context` | the pending merge proposal, when a tracked PR was approved |
 | `POST /api/tasks/:id/approve` | approve the current proposal: submit review, open PR, or merge tracked PR |
 | `POST /api/tasks/:id/merge` | confirm a tracked PR merge proposal |
 | `POST /api/tasks/:id/discard` | dismiss or cancel a non-terminal task |
-| `GET /api/containers` | live `docker ps` of the running codex runners |
+
+The document endpoints (`…/task`, `…/review`, `…/pr`) stay readable after a
+task is terminal, so an external frontend can index them for search. With
+`WEBHOOK_URL`/`WEBHOOK_SECRET` set, every task state change is also pushed as an
+HMAC-signed `task.state_changed` webhook carrying the full task object — see
+[API.md](API.md).
 
 ## Setup
 
@@ -174,6 +181,7 @@ Common optional environment variables:
 | `CONFIG_DIR` | Directory containing `defaults.yml` and `repos.yml` |
 | `API_TOKEN` | Bearer token enabling `/api/*`; unset disables the API with `503` |
 | `CORS_ORIGIN` | Browser frontend origin allowed by CORS |
+| `WEBHOOK_URL`, `WEBHOOK_SECRET` | Outbound state-transition webhook target and its HMAC signing secret; unset URL disables webhooks |
 | `GHCR_USERNAME`, `GHCR_TOKEN` | Credentials for worker pulls of private GHCR runner images |
 | `POLL_INTERVAL_SEC` | Polling cadence for repos with `poll: true` |
 | `HA_BASE_URL`, `HA_TOKEN`, `HA_NOTIFY_SERVICE` | Optional Home Assistant notification integration; all three are required to enable it |

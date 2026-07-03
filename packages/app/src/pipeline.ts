@@ -5,9 +5,11 @@ import {
   clearNotification,
   closeSubjectTasks,
   createTaskWithRun,
+  emitTaskStateChanged,
   enqueueTask,
   findActiveTask,
   findInReviewImplementTaskForPr,
+  findNonTerminalTask,
   findInReviewTasksTrackingAnyPr,
   findTasksTrackingPr,
   findTasksWaitingOnPr,
@@ -120,19 +122,37 @@ export async function startDraft(
   if (subject.state !== "open")
     return { status: "ignored", reason: "subject-closed" };
 
-  const active = await findActiveTask(repo.full_name, subject.type, subject.number);
-  if (active) {
-    // Refresh an in-flight draft with the new activity; otherwise leave the
-    // active task alone (don't pile work onto something already running).
-    if (active.kind === "implement" && (active.state === "draft" || active.state === "drafting")) {
-      const run = await addRun(active.id, loadEnv().agentDataDir);
-      await setTaskTrigger(active.id, triggeredBy, triggerCommentUrl);
-      await enqueueRun(active, run.id, "implement", "draft", followUpInput);
-      logger.info({ taskId: active.id, triggeredBy }, "draft refreshed");
-      return { status: "enqueued", taskId: active.id };
+  // One task per (repo, subjectNumber, kind) while non-terminal: repeat
+  // triggers fold into the existing implement task instead of adding rows.
+  const existing = await findNonTerminalTask(
+    repo.full_name,
+    subject.number,
+    "implement",
+  );
+  if (existing) {
+    // Refresh an in-flight draft with the new activity; otherwise just record
+    // the trigger on the task (don't pile work onto something already running
+    // or waiting on its PR) and let the webhook surface the follow-up.
+    if (existing.state === "draft" || existing.state === "drafting") {
+      const run = await addRun(existing.id, loadEnv().agentDataDir);
+      await setTaskTrigger(existing.id, triggeredBy, triggerCommentUrl);
+      await enqueueRun(existing, run.id, "implement", "draft", followUpInput);
+      emitTaskStateChanged(existing.id, existing.state);
+      logger.info({ taskId: existing.id, triggeredBy }, "draft refreshed");
+      return { status: "enqueued", taskId: existing.id };
     }
-    return { status: "ignored", reason: `already-active:${active.state}` };
+    await setTaskTrigger(existing.id, triggeredBy, triggerCommentUrl);
+    emitTaskStateChanged(existing.id, existing.state);
+    logger.info(
+      { taskId: existing.id, state: existing.state, triggeredBy },
+      "follow-up recorded on existing task",
+    );
+    return { status: "handled", action: `task-refreshed:${existing.id}` };
   }
+
+  // A different-kind task may still hold the subject's single active slot.
+  const active = await findActiveTask(repo.full_name, subject.type, subject.number);
+  if (active) return { status: "ignored", reason: `already-active:${active.state}` };
 
   return createAndEnqueue({
     repo,
@@ -156,18 +176,30 @@ export async function startReview(
   if (subject.state !== "open")
     return { status: "ignored", reason: "subject-closed" };
 
-  const active = await findActiveTask(repo.full_name, subject.type, subject.number);
-  if (active) {
+  // One task per (repo, subjectNumber, kind) while non-terminal: a repeated
+  // review trigger refreshes the existing review task; a new row only appears
+  // after the previous review is terminal.
+  const existing = await findNonTerminalTask(
+    repo.full_name,
+    subject.number,
+    "review",
+  );
+  if (existing) {
     // Re-review on new commits: replace a stale review (queued / ready) with a
     // fresh run. Don't interrupt a review that's actively running.
-    if (active.kind === "review" && active.state !== "running") {
-      const run = await addRun(active.id, loadEnv().agentDataDir);
-      await enqueueRun(active, run.id, "review", "execute");
-      logger.info({ taskId: active.id }, "review refreshed");
-      return { status: "enqueued", taskId: active.id };
+    if (existing.state !== "running") {
+      const run = await addRun(existing.id, loadEnv().agentDataDir);
+      await enqueueRun(existing, run.id, "review", "execute");
+      emitTaskStateChanged(existing.id, existing.state);
+      logger.info({ taskId: existing.id }, "review refreshed");
+      return { status: "enqueued", taskId: existing.id };
     }
-    return { status: "ignored", reason: `already-active:${active.state}` };
+    return { status: "ignored", reason: `already-active:${existing.state}` };
   }
+
+  // A different-kind task may still hold the subject's single active slot.
+  const active = await findActiveTask(repo.full_name, subject.type, subject.number);
+  if (active) return { status: "ignored", reason: `already-active:${active.state}` };
 
   return createAndEnqueue({
     repo,

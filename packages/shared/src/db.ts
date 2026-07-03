@@ -6,10 +6,14 @@ import type {
   SubjectType,
   Task,
   TaskKind,
+  TaskListItem,
   TaskRole,
   TaskRun,
   TaskState,
 } from "./types.js";
+// Circular at module level (webhook.ts reads tasks via getTaskListItem), but
+// only function references cross the boundary — safe under ESM evaluation.
+import { emitTaskStateChanged } from "./webhook.js";
 
 // The states that hold the single active slot per (repo, subject). Mirrors the
 // partial unique index `uq_one_active_task` (migration 1700000003000).
@@ -72,6 +76,29 @@ export async function findActiveTask(
      WHERE repo_full_name = $1 AND subject_type = $2 AND subject_number = $3
        AND state::text IN ${ACTIVE_STATE_SQL}`,
     [repoFullName, subjectType, subjectNumber],
+  );
+  return res.rows[0];
+}
+
+/**
+ * The latest non-terminal task for a `(repo, subjectNumber, kind)` tuple. The
+ * external task manager keeps exactly one of its tasks per issue/PR per kind, so
+ * repeat triggers must fold into this row instead of creating a new one — new
+ * rows are only allowed once it is terminal. Keyed on subject_number without
+ * subject_type: issues and PRs share GitHub's number space.
+ */
+export async function findNonTerminalTask(
+  repoFullName: string,
+  subjectNumber: number,
+  kind: TaskKind,
+): Promise<Task | undefined> {
+  const res = await getPool().query<Task>(
+    `SELECT * FROM tasks
+     WHERE repo_full_name = $1 AND subject_number = $2 AND kind = $3
+       AND state::text NOT IN ${TERMINAL_STATE_SQL}
+     ORDER BY updated_at DESC, id DESC
+     LIMIT 1`,
+    [repoFullName, subjectNumber, kind],
   );
   return res.rows[0];
 }
@@ -220,6 +247,7 @@ export async function createTaskWithRun(input: {
     }
     const run = await insertRun(client, task.id, 1, input.dataDir);
     await client.query("COMMIT");
+    emitTaskStateChanged(task.id, null); // creation: no previous state
     return { task, run };
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
@@ -283,11 +311,17 @@ export async function setTaskState(
   state: TaskState,
   reason: string | null = null,
 ): Promise<void> {
-  await getPool().query(`UPDATE tasks SET state = $2, state_reason = $3 WHERE id = $1`, [
-    id,
-    state,
-    reason,
-  ]);
+  // The FROM subquery snapshots the pre-update state (locked to avoid a
+  // concurrent-transition race) so the webhook can report the transition.
+  const res = await getPool().query<{ previous_state: TaskState }>(
+    `UPDATE tasks t SET state = $2, state_reason = $3
+     FROM (SELECT id, state FROM tasks WHERE id = $1 FOR UPDATE) prev
+     WHERE t.id = prev.id
+     RETURNING prev.state AS previous_state`,
+    [id, state, reason],
+  );
+  const prev = res.rows[0];
+  if (prev) emitTaskStateChanged(id, prev.previous_state);
 }
 
 export async function setTaskBranch(
@@ -323,10 +357,15 @@ export async function setTaskPrAndState(
   prNumber: number,
   state: TaskState,
 ): Promise<void> {
-  await getPool().query(
-    `UPDATE tasks SET pr_number = $2, state = $3, state_reason = NULL WHERE id = $1`,
+  const res = await getPool().query<{ previous_state: TaskState }>(
+    `UPDATE tasks t SET pr_number = $2, state = $3, state_reason = NULL
+     FROM (SELECT id, state FROM tasks WHERE id = $1 FOR UPDATE) prev
+     WHERE t.id = prev.id
+     RETURNING prev.state AS previous_state`,
     [id, prNumber, state],
   );
+  const prev = res.rows[0];
+  if (prev) emitTaskStateChanged(id, prev.previous_state);
 }
 
 export async function findTasksWaitingOnPr(repoFullName: string): Promise<Task[]> {
@@ -523,24 +562,28 @@ export async function closeSubjectTasks(
   state: Extract<TaskState, "done" | "cancelled">,
   reason: string | null = null,
 ): Promise<number> {
-  const res = await getPool().query(
-    `UPDATE tasks SET state = $4, state_reason = $5
-     WHERE repo_full_name = $1 AND subject_type = $2 AND subject_number = $3
-       AND state::text NOT IN ${TERMINAL_STATE_SQL}`,
+  const res = await getPool().query<{
+    id: string | number;
+    previous_state: TaskState;
+  }>(
+    `UPDATE tasks t SET state = $4, state_reason = $5
+     FROM (
+       SELECT id, state FROM tasks
+       WHERE repo_full_name = $1 AND subject_type = $2 AND subject_number = $3
+         AND state::text NOT IN ${TERMINAL_STATE_SQL}
+       FOR UPDATE
+     ) prev
+     WHERE t.id = prev.id
+     RETURNING t.id, prev.state AS previous_state`,
     [repoFullName, subjectType, subjectNumber, state, reason],
   );
+  for (const row of res.rows) {
+    emitTaskStateChanged(Number(row.id), row.previous_state);
+  }
   return res.rowCount ?? 0;
 }
 
 // ── listings (for the external frontend) ────────────────────────────────────
-
-export interface TaskListItem extends Task {
-  run_id: number | null;
-  attempt: number | null;
-  outcome: RunOutcome | null;
-  started_at: Date | null;
-  finished_at: Date | null;
-}
 
 export interface GcRunCandidate {
   id: number;
@@ -551,15 +594,21 @@ export interface GcRunCandidate {
 /**
  * Tasks joined with their latest run, newest first. scope='active' returns only
  * tasks that still need attention (non-terminal); 'all' returns everything.
+ * `updatedSince` additionally filters to tasks whose updated_at is at or after
+ * the timestamp (webhook-miss reconciliation; pass scope='all' so terminal
+ * transitions are included).
  */
 export async function listTasks(
   scope: "active" | "all",
   limit = 200,
+  updatedSince?: Date,
 ): Promise<TaskListItem[]> {
-  const where =
-    scope === "active"
-      ? `WHERE t.state::text NOT IN ${TERMINAL_STATE_SQL}`
-      : ``;
+  const clauses: string[] = [];
+  if (scope === "active")
+    clauses.push(`t.state::text NOT IN ${TERMINAL_STATE_SQL}`);
+  if (updatedSince) clauses.push(`t.updated_at >= $2`);
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : ``;
+  const params: unknown[] = updatedSince ? [limit, updatedSince] : [limit];
   const res = await getPool().query<TaskListItem>(
     `SELECT t.*,
        r.id AS run_id, r.attempt, r.outcome, r.started_at, r.finished_at
@@ -570,9 +619,26 @@ export async function listTasks(
      ${where}
      ORDER BY t.updated_at DESC
      LIMIT $1`,
-    [limit],
+    params,
   );
   return res.rows;
+}
+
+/** One task joined with its latest run (the GET /api/tasks/:id + webhook shape). */
+export async function getTaskListItem(
+  id: number,
+): Promise<TaskListItem | undefined> {
+  const res = await getPool().query<TaskListItem>(
+    `SELECT t.*,
+       r.id AS run_id, r.attempt, r.outcome, r.started_at, r.finished_at
+     FROM tasks t
+     LEFT JOIN LATERAL (
+       SELECT * FROM task_runs WHERE task_id = t.id ORDER BY attempt DESC LIMIT 1
+     ) r ON true
+     WHERE t.id = $1`,
+    [id],
+  );
+  return res.rows[0];
 }
 
 // ── task_runs ───────────────────────────────────────────────────────────────

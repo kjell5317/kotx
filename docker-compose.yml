@@ -47,9 +47,8 @@ services:
       - ./config:/app/config:ro
       - ./prompts:/app/prompts:ro
       # the API serves TASK.md/REVIEW.md and edits the brief (PUT) → needs rw
+      # (no Docker socket here — only the worker drives Docker)
       - ${AGENT_DATA_DIR:-/srv/agent}:${AGENT_DATA_DIR:-/srv/agent}
-      # read-only docker access so GET /api/containers can `docker ps` the runners
-      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
         condition: service_healthy

@@ -1,18 +1,17 @@
 import { timingSafeEqual } from "node:crypto";
-import { open, readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import cors from "@fastify/cors";
 import {
   addRun,
   approvePullRequestReview,
   clearNotification,
-  displayStatus,
   enqueueTask,
   getEnabledRepo,
   findNonTerminalTasksOnBranch,
-  getLatestRun,
   getOctokit,
   getTask,
+  getTaskListItem,
   loadRepos,
   listTasks,
   loadEnv,
@@ -20,20 +19,19 @@ import {
   mergePullRequest,
   openPullRequest,
   postIssueComment,
-  runDirFor,
   setCancelFlag,
   setTaskPrAndState,
   setTaskState,
   splitRepo,
   taskDirFor,
+  taskDto,
   taskNotifyTag,
   TERMINAL_STATES,
+  trackedPrNumber,
   updateBranchFromBase,
   type RepoConfig,
   type Task,
-  type TaskListItem,
 } from "@kotx/shared";
-import Docker from "dockerode";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { NormalizedSubject } from "./extract.js";
 import {
@@ -65,76 +63,6 @@ function requireAuth(req: FastifyRequest, reply: FastifyReply): boolean {
   return false;
 }
 
-function githubUrl(repo: string, subjectType: string, subjectNumber: number): string {
-  const kind = subjectType === "pull_request" ? "pull" : "issues";
-  return `https://github.com/${repo}/${kind}/${subjectNumber}`;
-}
-
-function taskDto(t: TaskListItem) {
-  const inExternal = t.state === "awaiting_external";
-  const trackedPr = trackedPrNumber(t);
-  const hasKnownPr = trackedPr !== null;
-  const mergeProposal =
-    t.kind === "implement" &&
-    t.state === "awaiting_approval" &&
-    trackedPr !== null;
-  return {
-    id: t.id,
-    repo: t.repo_full_name,
-    subjectType: t.subject_type,
-    subjectNumber: t.subject_number,
-    title: t.subject_title,
-    kind: t.kind,
-    role: t.role,
-    state: t.state,
-    status: inExternal
-      ? hasKnownPr
-        ? "in review"
-        : "waiting on PR"
-      : displayStatus(t.state),
-    stateReason: t.state_reason,
-    branch: t.branch_name,
-    prNumber: t.pr_number,
-    trackedPrNumber: trackedPr,
-    triggeredBy: t.triggered_by,
-    outcome: t.outcome,
-    attempt: t.attempt,
-    startedAt: t.started_at,
-    finishedAt: t.finished_at,
-    createdAt: t.created_at,
-    updatedAt: t.updated_at,
-    githubUrl: githubUrl(t.repo_full_name, t.subject_type, t.subject_number),
-    canStart: t.kind === "implement" && t.state === "draft",
-    // review → submit an approving PR review; implement (issue-origin) → open the proposed PR.
-    canApprove:
-      t.state === "awaiting_approval" &&
-      (t.kind === "review" || t.kind === "implement"),
-    canMerge: mergeProposal,
-    // review tasks can also post REVIEW.md as a plain PR comment instead.
-    canComment: t.kind === "review" && t.state === "awaiting_approval",
-    // what approving this task does, so the UI can label the button/proposal.
-    proposes:
-      t.state === "awaiting_approval"
-        ? t.kind === "review"
-          ? "review"
-          : t.kind === "implement"
-            ? mergeProposal
-              ? "merge"
-              : "pr"
-            : null
-        : null,
-    // any non-terminal task can be dismissed (e.g. one stuck "in review")
-    canDiscard: !TERMINAL_STATES.has(t.state),
-  };
-}
-
-function trackedPrNumber(
-  task: Pick<Task, "pr_number" | "subject_type" | "subject_number">,
-): number | null {
-  return task.pr_number ??
-    (task.subject_type === "pull_request" ? task.subject_number : null);
-}
-
 async function readFileOrNull(path: string): Promise<string | null> {
   try {
     return await readFile(path, "utf8");
@@ -143,19 +71,11 @@ async function readFileOrNull(path: string): Promise<string | null> {
   }
 }
 
-/** Read a per-task artifact (TASK.md / REVIEW.md) or null if absent. */
+/** Read a per-task artifact (TASK.md / REVIEW.md) or null if absent. These live
+ *  in the per-task dir, survive garbage collection, and stay readable after the
+ *  task is terminal (the external task manager indexes them for search). */
 function readTaskArtifact(taskId: number, name: string): Promise<string | null> {
   return readFileOrNull(join(taskDirFor(loadEnv().agentDataDir, taskId), name));
-}
-
-/** Read a file from a task's latest run dir (PROMPT.md / codex.jsonl). */
-async function readLatestRunArtifact(
-  taskId: number,
-  name: string,
-): Promise<string | null> {
-  const run = await getLatestRun(taskId);
-  if (!run) return null;
-  return readFileOrNull(join(runDirFor(loadEnv().agentDataDir, run.id), name));
 }
 
 async function requirePendingReview(
@@ -337,246 +257,6 @@ async function confirmMerge(
   };
 }
 
-const DEFAULT_LOG_LIMIT = 50;
-const MAX_LOG_LIMIT = 1000;
-const LOG_READ_CHUNK_BYTES = 64 * 1024;
-
-interface LogQuery {
-  limit: number;
-  before?: number;
-}
-
-interface LogLine {
-  startOffset: number;
-  endOffset: number;
-  bytes: Buffer;
-}
-
-interface LogEntry {
-  offset: number;
-  record?: unknown;
-  raw?: string;
-  parseError?: string;
-}
-
-interface LogPage {
-  runId: number;
-  entries: LogEntry[];
-  page: {
-    limit: number;
-    count: number;
-    startOffset: number;
-    endOffset: number;
-    sizeBytes: number;
-    hasMoreBefore: boolean;
-    hasMoreAfter: boolean;
-    nextBefore: number | null;
-  };
-}
-
-class LogQueryError extends Error {}
-
-async function readLatestRunLogPage(
-  taskId: number,
-  query: LogQuery,
-): Promise<LogPage | null> {
-  const run = await getLatestRun(taskId);
-  if (!run) return null;
-  const path = join(runDirFor(loadEnv().agentDataDir, run.id), "codex.jsonl");
-  try {
-    return await readLogFilePage(run.id, path, query);
-  } catch (err) {
-    if (
-      typeof err === "object" &&
-      err !== null &&
-      "code" in err &&
-      (err as { code?: string }).code === "ENOENT"
-    ) {
-      return null;
-    }
-    throw err;
-  }
-}
-
-export async function readLogFilePage(
-  runId: number,
-  path: string,
-  query: LogQuery,
-): Promise<LogPage> {
-  const fh = await open(path, "r");
-  try {
-    const stats = await fh.stat();
-    const sizeBytes = stats.size;
-    const endOffset = query.before ?? sizeBytes;
-    if (endOffset > sizeBytes) {
-      throw new LogQueryError(`before must be <= log size (${sizeBytes})`);
-    }
-    if (
-      query.before !== undefined &&
-      endOffset !== 0 &&
-      endOffset !== sizeBytes &&
-      !(await isLineBoundary(fh, endOffset))
-    ) {
-      throw new LogQueryError("before must be a line boundary cursor");
-    }
-    if (endOffset === 0 || query.limit === 0) {
-      return {
-        runId,
-        entries: [],
-        page: {
-          limit: query.limit,
-          count: 0,
-          startOffset: 0,
-          endOffset,
-          sizeBytes,
-          hasMoreBefore: false,
-          hasMoreAfter: endOffset < sizeBytes,
-          nextBefore: null,
-        },
-      };
-    }
-
-    let start = endOffset;
-    let buffer = Buffer.alloc(0);
-    let lines: LogLine[] = [];
-    while (start > 0) {
-      const chunkStart = Math.max(0, start - LOG_READ_CHUNK_BYTES);
-      const chunk = Buffer.alloc(start - chunkStart);
-      await fh.read(chunk, 0, chunk.length, chunkStart);
-      buffer = Buffer.concat([chunk, buffer]);
-      start = chunkStart;
-      lines = extractCompleteLines(buffer, start, endOffset);
-      if (lines.length >= query.limit) break;
-    }
-
-    const pageLines = lines.slice(-query.limit);
-    const startOffset = pageLines[0]?.startOffset ?? endOffset;
-    return {
-      runId,
-      entries: pageLines.map(logLineToEntry),
-      page: {
-        limit: query.limit,
-        count: pageLines.length,
-        startOffset,
-        endOffset,
-        sizeBytes,
-        hasMoreBefore: startOffset > 0,
-        hasMoreAfter: endOffset < sizeBytes,
-        nextBefore: startOffset > 0 ? startOffset : null,
-      },
-    };
-  } finally {
-    await fh.close();
-  }
-}
-
-async function isLineBoundary(
-  fh: Awaited<ReturnType<typeof open>>,
-  offset: number,
-): Promise<boolean> {
-  const byte = Buffer.alloc(1);
-  await fh.read(byte, 0, 1, offset - 1);
-  return byte[0] === 10;
-}
-
-function extractCompleteLines(
-  bytes: Buffer,
-  bufferStartOffset: number,
-  endOffset: number,
-): LogLine[] {
-  const lines: LogLine[] = [];
-  let lineStart = 0;
-  for (let i = 0; i < bytes.length; i += 1) {
-    if (bytes[i] !== 10) continue;
-    if (i > lineStart) {
-      lines.push({
-        startOffset: bufferStartOffset + lineStart,
-        endOffset: bufferStartOffset + i,
-        bytes: bytes.subarray(lineStart, i),
-      });
-    }
-    lineStart = i + 1;
-  }
-  if (lineStart < bytes.length) {
-    lines.push({
-      startOffset: bufferStartOffset + lineStart,
-      endOffset,
-      bytes: bytes.subarray(lineStart),
-    });
-  }
-  return bufferStartOffset === 0 ? lines : lines.slice(1);
-}
-
-function logLineToEntry(line: LogLine): LogEntry {
-  const raw = line.bytes.toString("utf8");
-  try {
-    return { offset: line.startOffset, record: JSON.parse(raw) };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "invalid JSON";
-    return { offset: line.startOffset, raw, parseError: message };
-  }
-}
-
-function parseLogQuery(
-  req: FastifyRequest,
-  reply: FastifyReply,
-): LogQuery | null {
-  const query = req.query as Record<string, unknown>;
-  const limit = parseOptionalPositiveInteger(
-    query.limit,
-    "limit",
-    DEFAULT_LOG_LIMIT,
-    MAX_LOG_LIMIT,
-  );
-  if (typeof limit === "string") {
-    reply.code(400).send({ error: limit });
-    return null;
-  }
-
-  const before = parseOptionalNonNegativeInteger(query.before, "before");
-  if (typeof before === "string") {
-    reply.code(400).send({ error: before });
-    return null;
-  }
-
-  return before === undefined ? { limit } : { limit, before };
-}
-
-function parseOptionalPositiveInteger(
-  value: unknown,
-  name: string,
-  fallback: number,
-  max: number,
-): number | string {
-  if (value === undefined) return fallback;
-  const parsed = parseSingleInteger(value, name);
-  if (typeof parsed === "string") return parsed;
-  if (parsed <= 0) return `${name} must be greater than 0`;
-  if (parsed > max) return `${name} must be <= ${max}`;
-  return parsed;
-}
-
-function parseOptionalNonNegativeInteger(
-  value: unknown,
-  name: string,
-): number | string | undefined {
-  if (value === undefined) return undefined;
-  const parsed = parseSingleInteger(value, name);
-  if (typeof parsed === "string") return parsed;
-  if (parsed < 0) return `${name} must be >= 0`;
-  return parsed;
-}
-
-function parseSingleInteger(value: unknown, name: string): number | string {
-  if (Array.isArray(value)) return `${name} must be provided once`;
-  if (typeof value !== "string" || !/^\d+$/.test(value)) {
-    return `${name} must be an integer`;
-  }
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) return `${name} is too large`;
-  return parsed;
-}
-
 type ManualRunType = "implement" | "review" | "resolve";
 
 interface ExistingManualRunRequest {
@@ -694,15 +374,42 @@ function parseJsonObjectBody(body: unknown): Record<string, unknown> | string {
   return obj as Record<string, unknown>;
 }
 
-const MANUAL_RUN_REPO_ALIASES = new Map<string, string>([
+// Pre-config aliases, kept as a fallback for live repos.yml files that predate
+// the per-repo `aliases` field. Config aliases take precedence.
+const LEGACY_REPO_ALIASES = new Map<string, string>([
   ["social ai", "TUM-Social-AI/AflaConnect"],
   ["csee", "askLio/CSEE-strategic-negotiation-agent"],
 ]);
 
+function aliasKeyOf(alias: string): string {
+  return alias.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/** Normalized alias → full_name, from repos.yml plus the legacy built-ins. */
+function repoAliasIndex(): Map<string, string> {
+  const index = new Map(LEGACY_REPO_ALIASES);
+  for (const repo of loadRepos().values()) {
+    for (const alias of repo.aliases) {
+      index.set(aliasKeyOf(alias), repo.full_name);
+    }
+  }
+  return index;
+}
+
+/** The aliases that resolve to a repo (configured + applicable legacy ones),
+ *  as served by GET /api/repos — the same set POST /api/runs accepts. */
+function repoAliases(fullName: string): string[] {
+  const aliases = [...(loadRepos().get(fullName)?.aliases ?? [])];
+  const seen = new Set(aliases.map(aliasKeyOf));
+  for (const [key, target] of LEGACY_REPO_ALIASES) {
+    if (target === fullName && !seen.has(key)) aliases.push(key);
+  }
+  return aliases;
+}
+
 function normalizeManualRunRepoInput(requested: string): string {
   const trimmed = requested.trim().replace(/\/+$/g, "");
-  const aliasKey = trimmed.replace(/\s+/g, " ").toLowerCase();
-  const alias = MANUAL_RUN_REPO_ALIASES.get(aliasKey);
+  const alias = repoAliasIndex().get(aliasKeyOf(trimmed));
   if (alias) return alias;
 
   const parts = trimmed.split("/");
@@ -885,12 +592,6 @@ function sendManualRunResult(
     .send({ error: result.reason, ...result, ...extra });
 }
 
-let docker: Docker | undefined;
-function getDocker(): Docker {
-  if (!docker) docker = new Docker();
-  return docker;
-}
-
 export function registerApi(app: FastifyInstance): void {
   const origin = loadEnv().corsOrigin;
   app.register(cors, { origin: origin ?? false, methods: ["GET", "POST", "PUT"] });
@@ -984,11 +685,34 @@ export function registerApi(app: FastifyInstance): void {
     return sendManualRunResult(reply, result);
   });
 
+  // The enabled repo allowlist (static, from config/repos.yml) so clients can
+  // route work and recognize tracked repos without hardcoding names/aliases.
+  app.get("/api/repos", async (req, reply) => {
+    if (!requireAuth(req, reply)) return;
+    return [...loadRepos().values()]
+      .filter((repo) => repo.enabled)
+      .map((repo) => ({
+        fullName: repo.full_name,
+        aliases: repoAliases(repo.full_name),
+        assignee: repo.assignee_login,
+        mergeMethod: repo.merge_method,
+      }));
+  });
+
   // Tasks where I'm assignee or my review is requested, with status.
+  // `updatedSince=<ISO timestamp>` switches to reconciliation mode: every task
+  // (terminal ones included, regardless of `scope`) whose updatedAt is at or
+  // after the timestamp — the polling fallback for missed webhooks.
   app.get("/api/tasks", async (req, reply) => {
     if (!requireAuth(req, reply)) return;
-    const scope =
-      (req.query as { scope?: string }).scope === "all" ? "all" : "active";
+    const query = req.query as { scope?: string; updatedSince?: string };
+    if (query.updatedSince !== undefined) {
+      const since = parseUpdatedSince(query.updatedSince, reply);
+      if (since === null) return;
+      const rows = await listTasks("all", 1000, since);
+      return rows.map(taskDto);
+    }
+    const scope = query.scope === "all" ? "all" : "active";
     const rows = await listTasks(scope);
     return rows.map(taskDto);
   });
@@ -997,9 +721,7 @@ export function registerApi(app: FastifyInstance): void {
     if (!requireAuth(req, reply)) return;
     const id = parseId(req, reply);
     if (id === null) return;
-    const rows = await listTasks("all", 1000);
-    // task ids are BIGINT → pg returns them as strings; coerce before comparing.
-    const row = rows.find((r) => Number(r.id) === id);
+    const row = await getTaskListItem(id);
     if (!row) return reply.code(404).send({ error: "no such task" });
     return taskDto(row);
   });
@@ -1099,16 +821,6 @@ export function registerApi(app: FastifyInstance): void {
     return { ok: true };
   });
 
-  app.get("/api/tasks/:id/merge", async (req, reply) => {
-    if (!requireAuth(req, reply)) return;
-    const id = parseId(req, reply);
-    if (id === null) return;
-    const text = await readTaskArtifact(id, "MERGE_APPROVAL.md");
-    if (text === null)
-      return reply.code(404).send({ error: "no merge proposal" });
-    return reply.type("text/markdown").send(text);
-  });
-
   app.get("/api/tasks/:id/merge/context", async (req, reply) => {
     if (!requireAuth(req, reply)) return;
     const id = parseId(req, reply);
@@ -1121,35 +833,6 @@ export function registerApi(app: FastifyInstance): void {
       reviewUrl: proposal.task.trigger_comment_url,
       commentMarkdown: proposal.commentMarkdown,
     };
-  });
-
-  // The exact prompt piped into Codex on the latest run (for inspection/debug).
-  app.get("/api/tasks/:id/prompt", async (req, reply) => {
-    if (!requireAuth(req, reply)) return;
-    const id = parseId(req, reply);
-    if (id === null) return;
-    const text = await readLatestRunArtifact(id, "PROMPT.md");
-    if (text === null) return reply.code(404).send({ error: "no PROMPT.md yet" });
-    return reply.type("text/markdown").send(text);
-  });
-
-  // A bounded JSON view of the latest Codex transcript, newest page by default.
-  app.get("/api/tasks/:id/log", async (req, reply) => {
-    if (!requireAuth(req, reply)) return;
-    const id = parseId(req, reply);
-    if (id === null) return;
-    const query = parseLogQuery(req, reply);
-    if (query === null) return;
-    try {
-      const page = await readLatestRunLogPage(id, query);
-      if (page === null) return reply.code(404).send({ error: "no log yet" });
-      return page;
-    } catch (err) {
-      if (err instanceof LogQueryError) {
-        return reply.code(400).send({ error: err.message });
-      }
-      throw err;
-    }
   });
 
   // Branch 1: start the implementation for a reviewed draft.
@@ -1296,31 +979,6 @@ export function registerApi(app: FastifyInstance): void {
     return { ok: true };
   });
 
-  // Live view of the running codex-runner containers.
-  app.get("/api/containers", async (req, reply) => {
-    if (!requireAuth(req, reply)) return;
-    try {
-      const list = await getDocker().listContainers({ all: false });
-      return list
-        .filter((c) => c.Names.some((n) => n.includes("codex-task-")))
-        .map((c) => {
-          const name = c.Names[0]?.replace(/^\//, "") ?? "";
-          const m = /codex-task-(\d+)/.exec(name);
-          return {
-            id: c.Id.slice(0, 12),
-            name,
-            runId: m ? Number(m[1]) : null,
-            image: c.Image,
-            state: c.State,
-            status: c.Status,
-            createdAt: c.Created,
-          };
-        });
-    } catch (err) {
-      logger.error({ err }, "docker ps failed");
-      return reply.code(503).send({ error: "docker unavailable" });
-    }
-  });
 }
 
 function parseId(req: FastifyRequest, reply: FastifyReply): number | null {
@@ -1330,6 +988,15 @@ function parseId(req: FastifyRequest, reply: FastifyReply): number | null {
     return null;
   }
   return id;
+}
+
+/** Parse the `updatedSince` query value as an ISO timestamp; 400 on garbage. */
+function parseUpdatedSince(value: unknown, reply: FastifyReply): Date | null {
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
+    reply.code(400).send({ error: "updatedSince must be an ISO 8601 timestamp" });
+    return null;
+  }
+  return new Date(value);
 }
 
 /**

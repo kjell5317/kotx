@@ -91,6 +91,15 @@ export interface Task {
   updated_at: Date;
 }
 
+/** A task joined with its latest run (the shape the API and webhook serve). */
+export interface TaskListItem extends Task {
+  run_id: number | null;
+  attempt: number | null;
+  outcome: RunOutcome | null;
+  started_at: Date | null;
+  finished_at: Date | null;
+}
+
 export interface TaskRun {
   id: number;
   task_id: number;

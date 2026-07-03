@@ -87,10 +87,12 @@ function subjectKindWord(task: Task): string {
   return task.subject_type === "pull_request" ? "pull request" : "issue";
 }
 
-/** Frontend URL opened when tapping a Home Assistant notification. Deep-links to
- * the task's modal via the frontend's `#run/<id>` hash route. The id is the TASK
- * id, not the run id: the API is task-keyed (`/api/tasks/:id/...`) and has no
- * per-run endpoint, so the frontend can only resolve a task id here. */
+/** Frontend URL opened when tapping a Home Assistant notification. Deep-links
+ * to the consolidated task modal via the frontend's `#run/<kotxTaskId>` alias,
+ * which redirects to `#task/<frontendTaskId>` (the frontend task that adopted
+ * this kotx task). The alias is the only stable anchor kotx can emit: it is
+ * keyed by the kotx TASK id, whereas the frontend's own task ids are unknown
+ * here. */
 function notifyUrl(taskId: number): string | undefined {
   const base = loadEnv().corsOrigin;
   return base ? `${base.replace(/\/$/, "")}/#run/${taskId}` : undefined;
