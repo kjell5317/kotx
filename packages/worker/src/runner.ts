@@ -149,6 +149,7 @@ export async function runCodexContainer(opts: {
     ? "for i in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 1; done; "
     : "";
   const effort = defaults.codex.reasoning_effort;
+  const webSearch = defaults.codex.web_search;
   const script =
     wait +
     [
@@ -163,6 +164,9 @@ export async function runCodexContainer(opts: {
       "--dangerously-bypass-approvals-and-sandbox",
       // operator-configured reasoning effort (omitted → model/config.toml default)
       ...(effort ? ["-c", `model_reasoning_effort="${effort}"`] : []),
+      // operator-configured Codex web search mode
+      "-c",
+      `web_search="${webSearch}"`,
       "-",
       "< /run-output/PROMPT.md",
       "> /run-output/codex.jsonl 2>&1",
