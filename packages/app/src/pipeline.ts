@@ -20,6 +20,7 @@ import {
   loadEnv,
   logger,
   notify,
+  setCancelFlag,
   setTaskPrAndState,
   setTaskState,
   setTaskTrigger,
@@ -192,7 +193,24 @@ export async function maybeResolveConflict(
   if (!dirty) return { status: "ignored", reason: "mergeable" };
 
   const active = await findActiveTask(repo.full_name, subject.type, subject.number);
-  if (active) return { status: "ignored", reason: `already-active:${active.state}` };
+  if (active) {
+    // A parked follow-up draft (waiting on "Start implementation", no run in
+    // flight) must not starve conflict resolution forever — the same priority
+    // rule pollPulls applies at creation time: conflicts win the slot. Cancel
+    // the draft (cancel flag also stops a just-enqueued draft run, mirroring
+    // the discard endpoint) and let the resolve task take over; a fresh
+    // follow-up draft reopens on the next comment once the PR is mergeable.
+    const parkedDraft = active.kind === "implement" && active.state === "draft";
+    if (!parkedDraft)
+      return { status: "ignored", reason: `already-active:${active.state}` };
+    await setCancelFlag(active.id);
+    await setTaskState(active.id, "cancelled", "preempted by conflict resolution");
+    await clearNotification(taskNotifyTag(active.id));
+    logger.info(
+      { taskId: active.id, prNumber: subject.number },
+      "parked draft preempted by conflict resolution",
+    );
+  }
 
   return createAndEnqueue({
     repo,
@@ -418,10 +436,11 @@ export async function reconcileTrackedPr(
 }
 
 /**
- * Re-check every tracked in-review PR for conflicts. This complements the
- * assignee-only polling path and webhook/default-branch events, so a PR that
- * becomes dirty while it is already awaiting external review heals itself on a
- * later periodic tick.
+ * Re-check every tracked PR (in review or awaiting merge confirmation) for
+ * conflicts. This complements the assignee-only polling path and
+ * webhook/default-branch events, so a PR that becomes dirty while it is
+ * already awaiting external review — or while a merge proposal sits
+ * unconfirmed — heals itself on a later periodic tick.
  */
 export async function scanTrackedPrConflicts(
   repo: RepoConfig,

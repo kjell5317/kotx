@@ -2,6 +2,7 @@ import { loadDefaults, loadEnv, loadRepos, logger, recordDelivery } from "@kotx/
 import Fastify from "fastify";
 import { registerApi } from "./api.js";
 import { normalize } from "./extract.js";
+import { startHaActionListener } from "./ha-actions.js";
 import { ingest } from "./pipeline.js";
 import { startPoller, startReconciler } from "./poller.js";
 import { verifySignature } from "./verify.js";
@@ -80,9 +81,12 @@ app
     logger.info({ port: env.port }, "app listening");
     const poller = startPoller(); // null if no repos use poll mode
     const reconciler = startReconciler(); // null if every enabled repo polls
+    // Notification-button taps (HA event bus) → task API; no-op without HA env.
+    const stopHaActions = startHaActionListener(app);
     const shutdown = async () => {
       if (poller) clearInterval(poller);
       if (reconciler) clearInterval(reconciler);
+      stopHaActions();
       await app.close();
       process.exit(0);
     };

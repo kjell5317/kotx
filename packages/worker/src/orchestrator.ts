@@ -22,6 +22,7 @@ import {
   maxWorkersForRepo,
   notify,
   releaseRepoSlot,
+  taskNotifyAction,
   runDirFor,
   setReviewedHeadSha,
   setTaskBranch,
@@ -30,6 +31,7 @@ import {
   taskNotifyTag,
   TERMINAL_STATES,
   type DraftFollowUpInput,
+  type NotifyAction,
   type RunOutcome,
   type Task,
   type TaskJob,
@@ -108,12 +110,29 @@ function notificationTitle(task: Task): string {
 /**
  * The pending action a terminal state expects of me, or undefined if the state
  * needs nothing from me. Only action-needed states (and failures, handled
- * separately) produce a notification.
+ * separately) produce a notification. `actions` are notification buttons that
+ * fire the corresponding API call directly (via the app's HA action listener),
+ * so the prompt can be answered without opening the frontend.
  */
-function pendingAction(state: TaskState, kind: TaskKind): string | undefined {
-  if (state === "draft") return "Start implementation";
-  if (state === "awaiting_approval")
-    return kind === "review" ? "Comment review" : "Open PR";
+function pendingAction(
+  state: TaskState,
+  kind: TaskKind,
+  taskId: number,
+): { message: string; actions?: NotifyAction[] } | undefined {
+  if (state === "draft")
+    return {
+      message: "Start implementation",
+      actions: [
+        { action: taskNotifyAction(taskId, "start"), title: "Start implementation" },
+      ],
+    };
+  if (state === "awaiting_approval") {
+    if (kind === "review") return { message: "Comment review" };
+    return {
+      message: "Open PR",
+      actions: [{ action: taskNotifyAction(taskId, "approve"), title: "Open PR" }],
+    };
+  }
   return undefined;
 }
 
@@ -749,7 +768,7 @@ export async function processJob(job: TaskJob): Promise<void> {
     if (started) {
       const fresh = await getTask(task.id).catch(() => undefined);
       const state = fresh?.state ?? "failed";
-      const action = pendingAction(state, job.kind);
+      const action = pendingAction(state, job.kind, task.id);
       const tag = taskNotifyTag(task.id);
       if (state === "failed") {
         // Replace on fail: swap any pending prompt for the failure (same tag).
@@ -762,9 +781,10 @@ export async function processJob(job: TaskJob): Promise<void> {
       } else if (action) {
         await notify({
           title: notificationTitle(task),
-          message: action,
+          message: action.message,
           tag,
           url: notifyUrl(task.id),
+          actions: action.actions,
         }).catch(() => {});
       } else {
         // Nothing pending (cancelled / done / pushed) → dismiss any stale prompt.

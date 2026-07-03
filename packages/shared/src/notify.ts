@@ -35,16 +35,47 @@ async function post(body: unknown, tag: string): Promise<void> {
   }
 }
 
+/** An actionable-notification button (Home Assistant companion app format).
+ * Tapping it fires a `mobile_app_notification_action` event on the HA event bus
+ * carrying `action`; the app's HA listener turns that back into an API call. */
+export interface NotifyAction {
+  action: string;
+  title: string;
+}
+
+/** The kinds of task actions a notification button can fire, mapped 1:1 onto
+ * the API's `POST /api/tasks/:id/<kind>` routes. */
+export type TaskNotifyActionKind = "start" | "approve";
+
+/** Stable action id for a notification button, e.g. `kotx-task-42-start`. */
+export function taskNotifyAction(
+  taskId: number,
+  kind: TaskNotifyActionKind,
+): string {
+  return `kotx-task-${taskId}-${kind}`;
+}
+
+/** Inverse of `taskNotifyAction`; null for foreign/malformed action ids. */
+export function parseTaskNotifyAction(
+  action: string,
+): { taskId: number; kind: TaskNotifyActionKind } | null {
+  const m = /^kotx-task-(\d+)-(start|approve)$/.exec(action);
+  if (!m) return null;
+  return { taskId: Number(m[1]), kind: m[2] as TaskNotifyActionKind };
+}
+
 /**
  * Push a notification to Home Assistant's notify service. `tag` lets a later
  * notification replace an earlier one with the same tag on Android (so a fresh
  * state updates in place), and lets `clearNotification` dismiss it later.
+ * `actions` become tappable buttons on the companion app.
  */
 export async function notify(opts: {
   title: string;
   message: string;
   tag: string;
   url?: string;
+  actions?: NotifyAction[];
 }): Promise<void> {
   await post(
     {
@@ -53,6 +84,7 @@ export async function notify(opts: {
       data: {
         tag: opts.tag, // Android: same tag replaces the previous notification
         ...(opts.url ? { clickAction: opts.url, url: opts.url } : {}),
+        ...(opts.actions?.length ? { actions: opts.actions } : {}),
       },
     },
     opts.tag,

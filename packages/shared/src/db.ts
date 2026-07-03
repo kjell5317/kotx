@@ -485,16 +485,26 @@ export async function findTasksTrackingAnyPr(repoFullName: string): Promise<Task
   return res.rows;
 }
 
+/**
+ * Tasks whose PR should be watched for new conflicts: in review
+ * (`awaiting_external`) or a pending merge proposal (`awaiting_approval`
+ * implement with a known PR — an approved PR can go dirty again while the
+ * confirm-merge prompt sits unanswered). awaiting_approval REVIEW tasks and
+ * open-PR proposals (pr_number null) are excluded: the former isn't the
+ * agent's PR, the latter has no PR yet.
+ */
 export async function findInReviewTasksTrackingAnyPr(
   repoFullName: string,
 ): Promise<Task[]> {
   const res = await getPool().query<Task>(
     `SELECT * FROM tasks
      WHERE repo_full_name = $1
-       AND state = 'awaiting_external'
        AND (
-         pr_number IS NOT NULL
-         OR subject_type = 'pull_request'
+         (state = 'awaiting_external'
+          AND (pr_number IS NOT NULL OR subject_type = 'pull_request'))
+         OR (state = 'awaiting_approval'
+             AND kind = 'implement'
+             AND pr_number IS NOT NULL)
        )
      ORDER BY updated_at DESC, id DESC`,
     [repoFullName],
