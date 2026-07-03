@@ -89,12 +89,24 @@ async function pollRepo(repo: RepoConfig): Promise<void> {
   const octokit = getOctokit();
   const [owner, name] = splitRepo(repo.full_name);
   const me = repo.assignee_login;
-  await reconcileWaitingPrs(repo);
-  await reconcileInReview(repo);
-  await pollIssues(octokit, owner, name, repo, me);
-  await pollPulls(octokit, owner, name, repo, me);
-  await pollComments(octokit, owner, name, repo, me);
-  await pollPrReviewActivity(octokit, owner, name, repo, me);
+  // Each step is independent — a transient GitHub failure in one must not skip
+  // the rest of the tick for this repo (cursors only advance on success, so a
+  // skipped step just retries next tick).
+  const steps: Array<[string, () => Promise<unknown>]> = [
+    ["reconcileWaitingPrs", () => reconcileWaitingPrs(repo)],
+    ["reconcileInReview", () => reconcileInReview(repo)],
+    ["pollIssues", () => pollIssues(octokit, owner, name, repo, me)],
+    ["pollPulls", () => pollPulls(octokit, owner, name, repo, me)],
+    ["pollComments", () => pollComments(octokit, owner, name, repo, me)],
+    ["pollPrReviewActivity", () => pollPrReviewActivity(octokit, owner, name, repo, me)],
+  ];
+  for (const [step, run] of steps) {
+    try {
+      await run();
+    } catch (err) {
+      logger.warn({ err, repo: repo.full_name, step }, "poll step failed");
+    }
+  }
 }
 
 async function reconcileInReview(repo: RepoConfig): Promise<void> {
@@ -106,7 +118,15 @@ async function reconcileInReview(repo: RepoConfig): Promise<void> {
       (task.subject_type === "pull_request" ? task.subject_number : null);
     if (!prNumber || seen.has(prNumber)) continue;
     seen.add(prNumber);
-    await reconcileTrackedPr(repo, prNumber);
+    try {
+      await reconcileTrackedPr(repo, prNumber);
+    } catch (err) {
+      // One PR failing to reconcile (e.g. a GitHub 5xx) must not block the rest.
+      logger.warn(
+        { err, repo: repo.full_name, prNumber },
+        "reconcile tracked PR failed",
+      );
+    }
   }
 }
 

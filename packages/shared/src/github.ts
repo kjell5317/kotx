@@ -1,12 +1,19 @@
 import { Octokit } from "@octokit/rest";
+import { retry } from "@octokit/plugin-retry";
 import { loadEnv } from "./config.js";
 import { logger } from "./logger.js";
 
+const OctokitWithRetry = Octokit.plugin(retry);
+
 let octokit: Octokit | undefined;
 
-/** A single Octokit authenticated with the personal access token. */
+/**
+ * A single Octokit authenticated with the personal access token. GitHub
+ * intermittently answers with empty-body 5xx errors; the retry plugin re-issues
+ * those (and network failures) with backoff instead of failing the caller.
+ */
 export function getOctokit(): Octokit {
-  if (!octokit) octokit = new Octokit({ auth: loadEnv().github.token });
+  if (!octokit) octokit = new OctokitWithRetry({ auth: loadEnv().github.token });
   return octokit;
 }
 

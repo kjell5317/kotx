@@ -9,6 +9,7 @@
     ".": "./dist/index.js"
   },
   "dependencies": {
+    "@octokit/plugin-retry": "^7.2.1",
     "@octokit/rest": "^21.0.0",
     "bullmq": "^5.34.0",
     "ioredis": "^5.4.0",
