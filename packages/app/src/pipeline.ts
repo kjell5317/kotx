@@ -138,10 +138,16 @@ export async function startDraft(
     // on the existing PR branch (deterministic name) and pushes an update.
     // Work already running (queued/running) is NOT interrupted — record the
     // trigger and let the webhook surface the follow-up.
+    // `awaiting_approval` with no PR yet is the propose-PR wait (execute done,
+    // "Open PR" pending) — a follow-up re-drafts it like awaiting_external. But
+    // `awaiting_approval` WITH a pr_number is the confirm-merge wait (a reviewer
+    // approved the PR); re-drafting would push commits and void that approval, so
+    // that one stays parked (trigger recorded).
     const reDraftable =
       existing.state === "draft" ||
       existing.state === "drafting" ||
-      existing.state === "awaiting_external";
+      existing.state === "awaiting_external" ||
+      (existing.state === "awaiting_approval" && existing.pr_number === null);
     if (reDraftable) {
       const run = await addRun(existing.id, loadEnv().agentDataDir);
       await setTaskTrigger(existing.id, triggeredBy, triggerCommentUrl);
