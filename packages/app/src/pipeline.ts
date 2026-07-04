@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   addRun,
+  cancelAbandonedIssueTasks,
   clearNotification,
   closeSubjectTasks,
   createTaskWithRun,
@@ -413,10 +414,18 @@ export async function markPrClosed(
   const tasks = await findTasksTrackingPr(repo.full_name, prNumber);
   let updated = 0;
   for (const task of tasks) {
+    // A MERGE completes the task → `done`, and it should reach the webhook (a
+    // merge done directly on GitHub is a real completion; a kotx-UI merge already
+    // set `done` via confirmMerge, so that task is terminal here and skipped).
+    // A CLOSE (unmerged) cancels: stop any in-flight run via the cancel flag, and
+    // terminalize SILENTLY — a closed PR is a GitHub-lifecycle event the consumer
+    // heals via its updatedSince reconciliation, not a pushed cancelled.
+    if (!merged) await setCancelFlag(task.id);
     await setTaskState(
       task.id,
       merged ? "done" : "cancelled",
       merged ? null : prCloseReason(prNumber),
+      merged,
     );
     // The PR is gone — any pending prompt for this task (e.g. "Comment review")
     // is stale, so dismiss it. Covers closeSubjectTasks' set too: its subject=PR
@@ -431,6 +440,7 @@ export async function markPrClosed(
     prNumber,
     merged ? "done" : "cancelled",
     merged ? null : prCloseReason(prNumber),
+    merged,
   );
   return updated + closed;
 }
@@ -580,6 +590,19 @@ export async function ingest(n: Normalized): Promise<IngestResult> {
       !!n.subject.merged,
     );
     return { status: "handled", action: `closed:${closed}` };
+  }
+
+  // A human closing the issue cancels its still-active tasks (and pushes the
+  // cancellation). Tasks that already opened a PR are governed by that PR's
+  // outcome (markPrClosed, silent), so only PR-less work — genuine abandonment —
+  // is cancelled here; an issue closed by merging its PR leaves nothing to cancel.
+  if (n.event === "issues" && n.action === "closed" && n.subject) {
+    const cancelled = await cancelAbandonedIssueTasks(
+      repo.full_name,
+      n.subject.number,
+      "issue closed",
+    );
+    return { status: "handled", action: `issue-closed:${cancelled}` };
   }
 
   // Branch 2 fan-out: a push to the default branch may have made my open PRs

@@ -1,9 +1,11 @@
 import {
+  cancelAbandonedIssueTasks,
   getLatestReviewTask,
   getOctokit,
   hasAnyTask,
   hasReviewTask,
   isAgentComment,
+  findNonTerminalIssueTasksWithoutPr,
   findTasksTrackingAnyPr,
   findTasksTrackingPr,
   loadRepos,
@@ -98,6 +100,7 @@ async function pollRepo(repo: RepoConfig): Promise<void> {
   const steps: Array<[string, () => Promise<unknown>]> = [
     ["reconcileWaitingPrs", () => reconcileWaitingPrs(repo)],
     ["reconcileInReview", () => reconcileInReview(repo)],
+    ["reconcileClosedIssues", () => reconcileClosedIssues(octokit, owner, name, repo)],
     ["scanTrackedPrConflicts", () => scanTrackedPrConflicts(repo)],
     ["pollIssues", () => pollIssues(octokit, owner, name, repo, me)],
     ["pollPulls", () => pollPulls(octokit, owner, name, repo, me)],
@@ -129,6 +132,43 @@ async function reconcileInReview(repo: RepoConfig): Promise<void> {
       logger.warn(
         { err, repo: repo.full_name, prNumber },
         "reconcile tracked PR failed",
+      );
+    }
+  }
+}
+
+/**
+ * Poll mode never lists closed issues (pollIssues asks for state=open), so a
+ * human closing an issue mid-work would otherwise leave its task stuck active.
+ * Check each PR-less non-terminal issue task's GitHub state and cancel the ones
+ * whose issue is closed — genuine abandonment. Tasks that opened a PR are left
+ * to reconcileInReview (a merge → done, silently), so a merge-closed issue is
+ * never cancelled here.
+ */
+async function reconcileClosedIssues(
+  octokit: Octokit,
+  owner: string,
+  name: string,
+  repo: RepoConfig,
+): Promise<void> {
+  const tasks = await findNonTerminalIssueTasksWithoutPr(repo.full_name);
+  const seen = new Set<number>();
+  for (const task of tasks) {
+    const issueNumber = task.subject_number;
+    if (seen.has(issueNumber)) continue;
+    seen.add(issueNumber);
+    try {
+      const { data } = await octokit.issues.get({
+        owner,
+        repo: name,
+        issue_number: issueNumber,
+      });
+      if (data.state !== "closed") continue;
+      await cancelAbandonedIssueTasks(repo.full_name, issueNumber, "issue closed");
+    } catch (err) {
+      logger.warn(
+        { err, repo: repo.full_name, issueNumber },
+        "reconcile closed issue failed",
       );
     }
   }

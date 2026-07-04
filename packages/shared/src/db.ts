@@ -14,6 +14,7 @@ import type {
 // Circular at module level (webhook.ts reads tasks via getTaskListItem), but
 // only function references cross the boundary — safe under ESM evaluation.
 import { emitTaskStateChanged } from "./webhook.js";
+import { setCancelFlag } from "./queue.js";
 
 // The states that hold the single active slot per (repo, subject). Mirrors the
 // partial unique index `uq_one_active_task` (migration 1700000003000).
@@ -315,6 +316,10 @@ export async function setTaskState(
   id: number,
   state: TaskState,
   reason: string | null = null,
+  // Pass false to change state WITHOUT firing the outbound webhook — used for PR
+  // closure, whose terminal transition is internal (the consumer heals via its
+  // updatedSince reconciliation) rather than a pushed event.
+  emit = true,
 ): Promise<void> {
   // The FROM subquery snapshots the pre-update state (locked to avoid a
   // concurrent-transition race) so the webhook can report the transition.
@@ -326,7 +331,7 @@ export async function setTaskState(
     [id, state, reason],
   );
   const prev = res.rows[0];
-  if (prev) emitTaskStateChanged(id, prev.previous_state);
+  if (prev && emit) emitTaskStateChanged(id, prev.previous_state);
 }
 
 export async function setTaskBranch(
@@ -377,6 +382,9 @@ export async function findTasksWaitingOnPr(repoFullName: string): Promise<Task[]
   // Only ISSUE implement tasks wait on a manually-opened PR. PR-subject tasks
   // already have their PR (the subject), so they must be excluded — otherwise
   // markPrOpened could stamp an unrelated PR sharing the head branch onto them.
+  // `awaiting_approval` is the propose-PR state (branch pushed, PR not opened
+  // yet): if the human opens that PR directly on GitHub instead of via kotx, we
+  // stamp its number and move to awaiting_external so the UI drops "Open PR".
   const res = await getPool().query<Task>(
     `SELECT * FROM tasks
      WHERE repo_full_name = $1
@@ -384,7 +392,7 @@ export async function findTasksWaitingOnPr(repoFullName: string): Promise<Task[]
        AND subject_type = 'issue'
        AND branch_name IS NOT NULL
        AND pr_number IS NULL
-       AND state = 'awaiting_external'`,
+       AND state IN ('awaiting_external', 'awaiting_approval')`,
     [repoFullName],
   );
   return res.rows;
@@ -566,6 +574,8 @@ export async function closeSubjectTasks(
   subjectNumber: number,
   state: Extract<TaskState, "done" | "cancelled">,
   reason: string | null = null,
+  // See setTaskState: false terminalizes silently (used for PR closure).
+  emit = true,
 ): Promise<number> {
   const res = await getPool().query<{
     id: string | number;
@@ -582,10 +592,64 @@ export async function closeSubjectTasks(
      RETURNING t.id, prev.state AS previous_state`,
     [repoFullName, subjectType, subjectNumber, state, reason],
   );
+  if (emit) {
+    for (const row of res.rows) {
+      emitTaskStateChanged(Number(row.id), row.previous_state);
+    }
+  }
+  return res.rowCount ?? 0;
+}
+
+/**
+ * Cancel still-active issue tasks that never opened a PR, emitting the webhook.
+ * A closed issue with no PR is abandoned work; a task closed *through a PR merge*
+ * already reached `done` (terminal) or carries a pr_number, so the pr_number/
+ * terminal filters exclude it and no spurious cancelled is sent.
+ */
+export async function cancelAbandonedIssueTasks(
+  repoFullName: string,
+  issueNumber: number,
+  reason: string | null = null,
+): Promise<number> {
+  const res = await getPool().query<{
+    id: string | number;
+    previous_state: TaskState;
+  }>(
+    `UPDATE tasks t SET state = 'cancelled', state_reason = $3
+     FROM (
+       SELECT id, state FROM tasks
+       WHERE repo_full_name = $1 AND subject_type = 'issue' AND subject_number = $2
+         AND pr_number IS NULL
+         AND state::text NOT IN ${TERMINAL_STATE_SQL}
+       FOR UPDATE
+     ) prev
+     WHERE t.id = prev.id
+     RETURNING t.id, prev.state AS previous_state`,
+    [repoFullName, issueNumber, reason],
+  );
   for (const row of res.rows) {
+    // Stop any in-flight run: the worker's cancel watcher kills the container and
+    // the run finalizes as cancelled. Harmless for parked tasks (1h TTL).
+    await setCancelFlag(Number(row.id));
     emitTaskStateChanged(Number(row.id), row.previous_state);
   }
   return res.rowCount ?? 0;
+}
+
+/** Non-terminal issue tasks that have not opened a PR — the poller checks each
+ *  issue's GitHub state to catch closures (poll mode never lists closed issues). */
+export async function findNonTerminalIssueTasksWithoutPr(
+  repoFullName: string,
+): Promise<Task[]> {
+  const res = await getPool().query<Task>(
+    `SELECT * FROM tasks
+     WHERE repo_full_name = $1
+       AND subject_type = 'issue'
+       AND pr_number IS NULL
+       AND state::text NOT IN ${TERMINAL_STATE_SQL}`,
+    [repoFullName],
+  );
+  return res.rows;
 }
 
 // ── listings (for the external frontend) ────────────────────────────────────

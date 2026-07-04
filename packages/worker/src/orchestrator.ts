@@ -196,6 +196,20 @@ function failureState(outcome: RunOutcome): TaskState {
   return "failed";
 }
 
+/**
+ * Persist a run's terminal state, but never PUSH a `cancelled` webhook. A cancel
+ * is always initiated elsewhere (PR/issue close, discard, preemption) and that
+ * caller owns the webhook decision — the worker only stops the run. Other
+ * terminal states (failed / timed_out) emit normally.
+ */
+async function setRunTerminalState(
+  taskId: number,
+  state: TaskState,
+  reason: string | null = null,
+): Promise<void> {
+  await setTaskState(taskId, state, reason, state !== "cancelled");
+}
+
 /** A short, human-readable reason for a non-completed run (for notifications). */
 function describeRunFailure(outcome: RunOutcome, exitCode: number): string {
   if (outcome === "timed_out") return "the run timed out";
@@ -291,7 +305,7 @@ async function runDraft(ctx: RunCtx): Promise<void> {
     await setTaskState(ctx.task.id, "draft");
   } else {
     ctx.setReason(describeRunFailure(outcome, guarded.exitCode));
-    await setTaskState(
+    await setRunTerminalState(
       ctx.task.id,
       failureState(outcome),
       describeRunFailure(outcome, guarded.exitCode),
@@ -428,7 +442,7 @@ async function runReview(ctx: RunCtx): Promise<void> {
     await setTaskState(ctx.task.id, "awaiting_approval");
   } else {
     ctx.setReason(describeRunFailure(outcome, guarded.exitCode));
-    await setTaskState(
+    await setRunTerminalState(
       ctx.task.id,
       failureState(outcome),
       describeRunFailure(outcome, guarded.exitCode),
@@ -468,7 +482,7 @@ async function finalizeWrite(
 
   if (outcome !== "completed") {
     ctx.setReason(describeRunFailure(outcome, guarded.exitCode));
-    await setTaskState(
+    await setRunTerminalState(
       ctx.task.id,
       failureState(outcome),
       describeRunFailure(outcome, guarded.exitCode),
@@ -492,7 +506,7 @@ async function finalizeWrite(
   const commit = await commitWithHookRepair(ctx, opts.rerun);
   if (!commit.ok) {
     ctx.setReason(commit.reason);
-    await setTaskState(ctx.task.id, commit.state, commit.reason);
+    await setRunTerminalState(ctx.task.id, commit.state, commit.reason);
     await removeWorktree(ctx.repoFullName, ctx.worktreePath);
     return;
   }
@@ -661,7 +675,7 @@ export async function processJob(job: TaskJob): Promise<void> {
 
   try {
     if (await isCancelled(task.id)) {
-      await setTaskState(task.id, "cancelled", "cancelled before the run started");
+      await setRunTerminalState(task.id, "cancelled", "cancelled before the run started");
       return;
     }
 
