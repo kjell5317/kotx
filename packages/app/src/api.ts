@@ -847,7 +847,7 @@ export function registerApi(app: FastifyInstance): void {
     const run = await addRun(id, loadEnv().agentDataDir);
     await setTaskState(id, "queued");
     await enqueueRun(task, run.id, "execute");
-    // The "Start implementation" prompt is done with — dismiss its notification.
+    // Dismiss any stale notification for older deployments that sent prompts.
     await clearNotification(taskNotifyTag(id));
     logger.info({ taskId: id }, "task started from API");
     return { ok: true };
@@ -952,7 +952,7 @@ export function registerApi(app: FastifyInstance): void {
         assignees: [repo.assignee_login],
       });
       await setTaskPrAndState(id, pr.number, "awaiting_external");
-      // The PR is open — the "Open PR" notification is stale, dismiss it.
+      // Dismiss any stale notification for older deployments that sent prompts.
       await clearNotification(taskNotifyTag(id));
       logger.info({ taskId: id, prNumber: pr.number }, "PR proposal approved and opened");
       return { ok: true, prNumber: pr.number, prUrl: pr.htmlUrl };

@@ -29,13 +29,13 @@ interface HaMessage {
 }
 
 /**
- * Listen on Home Assistant's event bus for notification-button taps and fire
- * the corresponding task action. The companion app turns a tapped action button
- * into a `mobile_app_notification_action` event carrying the button's `action`
- * id; ids minted by `taskNotifyAction` are mapped back onto the task API
- * (`kotx-task-42-start` → `POST /api/tasks/42/start`) and dispatched in-process
- * via Fastify's inject, so the button goes through exactly the same auth and
- * state guards as the frontend. No HA automation is needed.
+ * Listen on Home Assistant's event bus for stale notification-button taps from
+ * older deployments and fire the corresponding task action. The companion app
+ * turns a tapped action button into a `mobile_app_notification_action` event
+ * carrying the button's `action` id; legacy ids such as `kotx-task-42-start`
+ * are mapped back onto the task API (`POST /api/tasks/42/start`) and dispatched
+ * in-process via Fastify's inject, so the button goes through exactly the same
+ * auth and state guards as the frontend. No HA automation is needed.
  *
  * No-op unless the HA notify env vars are set (same gate as `notify`) — but the
  * API must be enabled (API_TOKEN) for the dispatch to pass auth.

@@ -184,7 +184,7 @@ Common optional environment variables:
 | `WEBHOOK_URL`, `WEBHOOK_SECRET` | Outbound state-transition webhook target and its HMAC signing secret; unset URL disables webhooks |
 | `GHCR_USERNAME`, `GHCR_TOKEN` | Credentials for worker pulls of private GHCR runner images |
 | `POLL_INTERVAL_SEC` | Polling cadence for repos with `poll: true` |
-| `HA_BASE_URL`, `HA_TOKEN`, `HA_NOTIFY_SERVICE` | Optional Home Assistant notification integration; all three are required to enable it |
+| `HA_BASE_URL`, `HA_TOKEN`, `HA_NOTIFY_SERVICE` | Optional Home Assistant failure notification integration; all three are required to enable it |
 | `LOG_LEVEL` | Pino log level |
 
 ## Images & CI
