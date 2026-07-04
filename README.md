@@ -70,7 +70,9 @@ The document endpoints (`…/task`, `…/review`, `…/pr`) stay readable after 
 task is terminal, so an external frontend can index them for search. With
 `WEBHOOK_URL`/`WEBHOOK_SECRET` set, every task state change is also pushed as an
 HMAC-signed `task.state_changed` webhook carrying the full task object — see
-[API.md](API.md).
+[API.md](API.md). If you are replacing the former non-failure Home Assistant
+mobile prompts in another task UI, see
+[HOME_ASSISTANT_NOTIFICATION_HANDOFF.md](HOME_ASSISTANT_NOTIFICATION_HANDOFF.md).
 
 ## Setup
 
@@ -184,7 +186,7 @@ Common optional environment variables:
 | `WEBHOOK_URL`, `WEBHOOK_SECRET` | Outbound state-transition webhook target and its HMAC signing secret; unset URL disables webhooks |
 | `GHCR_USERNAME`, `GHCR_TOKEN` | Credentials for worker pulls of private GHCR runner images |
 | `POLL_INTERVAL_SEC` | Polling cadence for repos with `poll: true` |
-| `HA_BASE_URL`, `HA_TOKEN`, `HA_NOTIFY_SERVICE` | Optional Home Assistant notification integration; all three are required to enable it |
+| `HA_BASE_URL`, `HA_TOKEN`, `HA_NOTIFY_SERVICE` | Optional Home Assistant failure notification integration; all three are required to enable it |
 | `LOG_LEVEL` | Pino log level |
 
 ## Images & CI

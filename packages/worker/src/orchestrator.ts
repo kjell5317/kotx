@@ -22,7 +22,6 @@ import {
   maxWorkersForRepo,
   notify,
   releaseRepoSlot,
-  taskNotifyAction,
   runDirFor,
   setReviewedHeadSha,
   setTaskBranch,
@@ -31,7 +30,6 @@ import {
   taskNotifyTag,
   TERMINAL_STATES,
   type DraftFollowUpInput,
-  type NotifyAction,
   type RunOutcome,
   type Task,
   type TaskJob,
@@ -107,35 +105,6 @@ function notificationTitle(task: Task): string {
   const title =
     raw.length > TITLE_MAX ? `${raw.slice(0, TITLE_MAX - 1).trimEnd()}…` : raw;
   return title ? `${subjectLabel(task)} ${title}` : subjectLabel(task);
-}
-
-/**
- * The pending action a terminal state expects of me, or undefined if the state
- * needs nothing from me. Only action-needed states (and failures, handled
- * separately) produce a notification. `actions` are notification buttons that
- * fire the corresponding API call directly (via the app's HA action listener),
- * so the prompt can be answered without opening the frontend.
- */
-function pendingAction(
-  state: TaskState,
-  kind: TaskKind,
-  taskId: number,
-): { message: string; actions?: NotifyAction[] } | undefined {
-  if (state === "draft")
-    return {
-      message: "Start implementation",
-      actions: [
-        { action: taskNotifyAction(taskId, "start"), title: "Start implementation" },
-      ],
-    };
-  if (state === "awaiting_approval") {
-    if (kind === "review") return { message: "Comment review" };
-    return {
-      message: "Open PR",
-      actions: [{ action: taskNotifyAction(taskId, "approve"), title: "Open PR" }],
-    };
-  }
-  return undefined;
 }
 
 interface Guarded {
@@ -775,26 +744,17 @@ export async function processJob(job: TaskJob): Promise<void> {
     if (started) {
       const fresh = await getTask(task.id).catch(() => undefined);
       const state = fresh?.state ?? "failed";
-      const action = pendingAction(state, job.kind, task.id);
       const tag = taskNotifyTag(task.id);
       if (state === "failed") {
-        // Replace on fail: swap any pending prompt for the failure (same tag).
+        // Replace on fail: swap any stale task notification for the failure.
         await notify({
           title: notificationTitle(task),
           message: failureReason ? `Failed — ${failureReason}` : "Failed",
           tag,
           url: notifyUrl(task.id),
         }).catch(() => {});
-      } else if (action) {
-        await notify({
-          title: notificationTitle(task),
-          message: action.message,
-          tag,
-          url: notifyUrl(task.id),
-          actions: action.actions,
-        }).catch(() => {});
       } else {
-        // Nothing pending (cancelled / done / pushed) → dismiss any stale prompt.
+        // Normal states are covered by webhooks; dismiss any stale notification.
         await clearNotification(tag).catch(() => {});
       }
     }
