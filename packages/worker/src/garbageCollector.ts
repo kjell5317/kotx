@@ -3,8 +3,8 @@ import { basename, dirname, resolve } from "node:path";
 import Docker from "dockerode";
 import {
   listActiveRunIds,
-  listFinishedNonLatestRunsOlderThan,
-  listRetainableFinishedNonLatestRuns,
+  listCollectableFinishedRuns,
+  listCollectableFinishedRunsOlderThan,
   loadDefaults,
   loadEnv,
   logger,
@@ -91,7 +91,7 @@ async function runsOverByteLimit(
 ): Promise<Set<number>> {
   if (maxRetainedRunBytes === null) return new Set();
 
-  const runs = await sizedRuns(dataDir, await listRetainableFinishedNonLatestRuns());
+  const runs = await sizedRuns(dataDir, await listCollectableFinishedRuns());
   let retainedBytes = runs.reduce((sum, run) => sum + run.bytes, 0);
   const deleteIds = new Set<number>();
   for (const run of runs) {
@@ -106,7 +106,7 @@ async function collectFilesystem(): Promise<void> {
   const env = loadEnv();
   const gc = loadDefaults().garbage_collection;
   const cutoff = new Date(Date.now() - gc.run_retention_sec * 1000);
-  const ageEligible = await listFinishedNonLatestRunsOlderThan(cutoff);
+  const ageEligible = await listCollectableFinishedRunsOlderThan(cutoff);
   const byteEligible = await runsOverByteLimit(
     env.agentDataDir,
     gc.max_retained_run_bytes,

@@ -11,11 +11,12 @@ timeouts:
 
 garbage_collection:
   enabled: true
-  # Deletes only finished, non-latest run dirs and matching disposable worktrees.
-  # Task dirs, git mirrors, latest run dirs, and active task runs are retained.
-  run_retention_sec: 604800 # 7 days
+  # Deletes finished run dirs + disposable worktrees for superseded attempts and
+  # for TERMINAL tasks (done/failed/cancelled/…). Task dirs, git mirrors, and the
+  # latest run of a still-live task (active or PR-open) are retained.
+  run_retention_sec: 604800 # 7 days — collectable runs older than this are dropped
   sweep_interval_sec: 3600 # 1 hour
-  max_retained_run_bytes: 10737418240 # 10 GiB across retainable non-latest runs
+  max_retained_run_bytes: 10737418240 # 10 GiB cap across all collectable finished runs
 
 container:
   cpus: 2

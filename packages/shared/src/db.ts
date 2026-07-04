@@ -688,10 +688,18 @@ export async function listLatestRunIds(): Promise<number[]> {
 }
 
 /**
- * Finished, non-latest runs whose parent task is no longer in an active state.
- * These are the only run logs/worktrees eligible for garbage collection.
+ * Finished runs eligible for garbage collection, oldest first. A run qualifies
+ * when its parent task is not active AND either:
+ *   - it is not the task's latest run (a superseded attempt), or
+ *   - the task is TERMINAL (done/failed/cancelled/…): once a task is finished
+ *     for good, even its latest run's logs/worktree are just history and fall
+ *     under retention. This is what bounds disk: most tasks have a single
+ *     (== latest) run, so without the terminal clause nearly every run was
+ *     immortal and `runs/` grew without limit.
+ * The latest run of a still-live task (e.g. awaiting_external, PR open) is kept
+ * so the frontend can show its current logs.
  */
-export async function listRetainableFinishedNonLatestRuns(): Promise<
+export async function listCollectableFinishedRuns(): Promise<
   GcRunCandidate[]
 > {
   const res = await getPool().query<{
@@ -709,8 +717,8 @@ export async function listRetainableFinishedNonLatestRuns(): Promise<
      JOIN tasks t ON t.id = r.task_id
      LEFT JOIN latest l ON l.id = r.id
      WHERE r.finished_at IS NOT NULL
-       AND l.id IS NULL
        AND t.state::text NOT IN ${ACTIVE_STATE_SQL}
+       AND (l.id IS NULL OR t.state::text IN ${TERMINAL_STATE_SQL})
      ORDER BY r.finished_at ASC, r.id ASC`,
   );
   return res.rows.map((r) => ({
@@ -720,10 +728,10 @@ export async function listRetainableFinishedNonLatestRuns(): Promise<
   }));
 }
 
-export async function listFinishedNonLatestRunsOlderThan(
+export async function listCollectableFinishedRunsOlderThan(
   cutoff: Date,
 ): Promise<GcRunCandidate[]> {
-  const runs = await listRetainableFinishedNonLatestRuns();
+  const runs = await listCollectableFinishedRuns();
   return runs.filter((run) => run.finished_at < cutoff);
 }
 

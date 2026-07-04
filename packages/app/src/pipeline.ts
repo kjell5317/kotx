@@ -146,7 +146,9 @@ export async function startDraft(
       const run = await addRun(existing.id, loadEnv().agentDataDir);
       await setTaskTrigger(existing.id, triggeredBy, triggerCommentUrl);
       await enqueueRun(existing, run.id, "implement", "draft", followUpInput);
-      emitTaskStateChanged(existing.id, existing.state);
+      // No webhook here: the state is still unchanged, so emitting would send a
+      // redundant no-op event. The worker fires the real transition (→ drafting)
+      // when it picks up the run.
       logger.info(
         { taskId: existing.id, triggeredBy, fromState: existing.state },
         "draft refreshed",

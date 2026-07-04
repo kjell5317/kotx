@@ -338,8 +338,13 @@ async function runImplement(ctx: RunCtx, merge: MergeResult): Promise<void> {
   const brief =
     (await readArtifact(ctx.taskDir, "TASK.md")) ??
     `${ctx.subject.title}\n\n${ctx.subject.body}`;
-  // Issue-origin work has no PR yet: the agent proposes one for human approval.
-  const opensPr = ctx.task.subject_type === "issue";
+  // Issue-origin work proposes a PR for human approval — but only on the FIRST
+  // implement, when no PR exists yet. A follow-up re-run (the task already opened
+  // its PR, so pr_number is set) just pushes to that PR's branch and returns to
+  // awaiting_external. Re-proposing would strand it in awaiting_approval with no
+  // merge proposal, so clicking Merge errors "no pending merge proposal".
+  const opensPr =
+    ctx.task.subject_type === "issue" && ctx.task.pr_number === null;
   const prTemplate = opensPr
     ? ((await readPrTemplate(ctx.worktreePath)) ?? undefined)
     : undefined;
