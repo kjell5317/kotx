@@ -130,15 +130,27 @@ export async function startDraft(
     "implement",
   );
   if (existing) {
-    // Refresh an in-flight draft with the new activity; otherwise just record
-    // the trigger on the task (don't pile work onto something already running
-    // or waiting on its PR) and let the webhook surface the follow-up.
-    if (existing.state === "draft" || existing.state === "drafting") {
+    // A follow-up re-runs the DRAFT phase so the feedback lands in TASK.md — the
+    // execute phase reads TASK.md, not the raw comment, so re-drafting (then a
+    // human "Start implementation") is how feedback reaches the code. This also
+    // covers a comment on the open PR of an issue-origin task (awaiting_external,
+    // nothing in flight): re-drafting re-engages it, and the later execute builds
+    // on the existing PR branch (deterministic name) and pushes an update.
+    // Work already running (queued/running) is NOT interrupted — record the
+    // trigger and let the webhook surface the follow-up.
+    const reDraftable =
+      existing.state === "draft" ||
+      existing.state === "drafting" ||
+      existing.state === "awaiting_external";
+    if (reDraftable) {
       const run = await addRun(existing.id, loadEnv().agentDataDir);
       await setTaskTrigger(existing.id, triggeredBy, triggerCommentUrl);
       await enqueueRun(existing, run.id, "implement", "draft", followUpInput);
       emitTaskStateChanged(existing.id, existing.state);
-      logger.info({ taskId: existing.id, triggeredBy }, "draft refreshed");
+      logger.info(
+        { taskId: existing.id, triggeredBy, fromState: existing.state },
+        "draft refreshed",
+      );
       return { status: "enqueued", taskId: existing.id };
     }
     await setTaskTrigger(existing.id, triggeredBy, triggerCommentUrl);
