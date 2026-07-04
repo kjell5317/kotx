@@ -22,7 +22,6 @@ import {
   isUniqueViolation,
   loadEnv,
   logger,
-  notify,
   setCancelFlag,
   setTaskPrAndState,
   setTaskState,
@@ -241,8 +240,8 @@ export async function maybeResolveConflict(
 
   const active = await findActiveTask(repo.full_name, subject.type, subject.number);
   if (active) {
-    // A parked follow-up draft (waiting on "Start implementation", no run in
-    // flight) must not starve conflict resolution forever — the same priority
+    // A parked follow-up draft (waiting to be started, no run in flight) must
+    // not starve conflict resolution forever — the same priority
     // rule pollPulls applies at creation time: conflicts win the slot. Cancel
     // the draft (cancel flag also stops a just-enqueued draft run, mirroring
     // the discard endpoint) and let the resolve task take over; a fresh
@@ -375,11 +374,6 @@ export async function proposeMergeForApprovedReview(
     throw err;
   }
 
-  await notify({
-    title: `PR #${prNumber} approved`,
-    message: "Confirm merge",
-    tag: taskNotifyTag(task.id),
-  }).catch(() => {});
   logger.info(
     { taskId: task.id, prNumber, reviewer: review.authorLogin },
     "merge proposal created from approving review",
@@ -427,9 +421,9 @@ export async function markPrClosed(
       merged ? null : prCloseReason(prNumber),
       merged,
     );
-    // The PR is gone — any pending prompt for this task (e.g. "Comment review")
-    // is stale, so dismiss it. Covers closeSubjectTasks' set too: its subject=PR
-    // rows are a subset of the tasks found here.
+    // The PR is gone — any stale task notification should be dismissed. Covers
+    // closeSubjectTasks' set too: its subject=PR rows are a subset of the tasks
+    // found here.
     await clearNotification(taskNotifyTag(task.id));
     updated++;
   }
