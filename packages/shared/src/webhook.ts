@@ -18,6 +18,13 @@ export const WEBHOOK_SIGNATURE_HEADER = "X-Kotx-Signature";
 const RETRY_DELAYS_MS = [1_000, 5_000, 25_000, 60_000];
 const ATTEMPT_TIMEOUT_MS = 10_000;
 
+// `queued` usually lasts only milliseconds: a task is set queued, enqueued, and
+// a free worker flips it to `running` almost at once. Only report queued if the
+// task is STILL waiting after this grace window, so the consumer sees a queued
+// event for real waits (all slots busy) and not for instant flush-throughs. The
+// running/next transition emits its own webhook, so nothing is lost by skipping.
+const QUEUED_GRACE_MS = 2_000;
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -70,11 +77,31 @@ async function dispatch(
 ): Promise<void> {
   // Load the task fresh (joined with its latest run) so the payload equals
   // GET /api/tasks/:id at delivery time — an upsert, not an event log.
-  const row = await getTaskListItem(taskId);
+  let row = await getTaskListItem(taskId);
   if (!row) {
     logger.warn({ taskId }, "webhook skipped: task not found");
     return;
   }
+
+  // A queued task that a free worker picks up immediately shouldn't emit a
+  // queued event. Wait a grace window and re-check: if it already left queued,
+  // drop this delivery (the transition it moved to sends its own webhook).
+  if (row.state === "queued") {
+    await sleep(QUEUED_GRACE_MS);
+    row = await getTaskListItem(taskId);
+    if (!row) {
+      logger.warn({ taskId }, "webhook skipped: task not found");
+      return;
+    }
+    if (row.state !== "queued") {
+      logger.debug(
+        { taskId, state: row.state },
+        "webhook skipped: queued flushed within grace window",
+      );
+      return;
+    }
+  }
+
   const rawBody = JSON.stringify({
     event: "task.state_changed",
     previousState,

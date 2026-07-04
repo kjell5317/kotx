@@ -395,13 +395,20 @@ async function pollPrReviewActivity(
         if (!fresh) continue;
         const author = r.user?.login ?? "";
         const reviewState = String(r.state ?? "").toLowerCase();
-        if (reviewState === "approved" && isAssignee) {
-          await proposeMergeForApprovedReview(repo, subject, {
-            state: reviewState,
-            body,
-            authorLogin: author,
-            htmlUrl: r.html_url ?? null,
-          });
+        // An approval is not a re-review trigger. A reviewed PR stays reviewed
+        // until new commits (push, via pollPulls' head-SHA check) or a real
+        // comment arrive — an approval is neither. For an assignee it's the
+        // merge-proposal signal; for a reviewer it's not actionable, so never
+        // spin up a fresh review. (My own approvals with an empty body carry no
+        // agent marker, so without this they'd re-trigger a review of myself.)
+        if (reviewState === "approved") {
+          if (isAssignee)
+            await proposeMergeForApprovedReview(repo, subject, {
+              state: reviewState,
+              body,
+              authorLogin: author,
+              htmlUrl: r.html_url ?? null,
+            });
           continue;
         }
         await handleItem(author, r.html_url ?? null, {
