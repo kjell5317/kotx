@@ -628,10 +628,14 @@ export async function cancelAbandonedIssueTasks(
     [repoFullName, issueNumber, reason],
   );
   for (const row of res.rows) {
-    // Stop any in-flight run: the worker's cancel watcher kills the container and
-    // the run finalizes as cancelled. Harmless for parked tasks (1h TTL).
-    await setCancelFlag(Number(row.id));
-    emitTaskStateChanged(Number(row.id), row.previous_state);
+    const id = Number(row.id);
+    // Emit FIRST so the cancellation webhook always fires — it must not depend on
+    // the cancel-flag write. Then stop any in-flight run (best-effort): the
+    // worker's watcher kills the container and the run finalizes as cancelled,
+    // silently, since this emit already owns the webhook. Harmless for parked
+    // tasks (the flag has a 1h TTL and nothing to kill).
+    emitTaskStateChanged(id, row.previous_state);
+    await setCancelFlag(id).catch(() => {});
   }
   return res.rowCount ?? 0;
 }
