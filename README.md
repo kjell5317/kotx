@@ -70,7 +70,9 @@ The document endpoints (`…/task`, `…/review`, `…/pr`) stay readable after 
 task is terminal, so an external frontend can index them for search. With
 `WEBHOOK_URL`/`WEBHOOK_SECRET` set, every task state change is also pushed as an
 HMAC-signed `task.state_changed` webhook carrying the full task object — see
-[API.md](API.md).
+[API.md](API.md). If you are replacing the former non-failure Home Assistant
+mobile prompts in another task UI, see
+[HOME_ASSISTANT_NOTIFICATION_HANDOFF.md](HOME_ASSISTANT_NOTIFICATION_HANDOFF.md).
 
 ## Setup
 
