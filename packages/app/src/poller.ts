@@ -21,6 +21,7 @@ import {
   maybeResolveConflict,
   prMergeState,
   proposeMergeForApprovedReview,
+  resolveReviewOnHumanApproval,
   reconcileTrackedPr,
   reconcileWaitingPrs,
   scanTrackedPrConflicts,
@@ -438,17 +439,20 @@ async function pollPrReviewActivity(
         // An approval is not a re-review trigger. A reviewed PR stays reviewed
         // until new commits (push, via pollPulls' head-SHA check) or a real
         // comment arrive — an approval is neither. For an assignee it's the
-        // merge-proposal signal; for a reviewer it's not actionable, so never
-        // spin up a fresh review. (My own approvals with an empty body carry no
-        // agent marker, so without this they'd re-trigger a review of myself.)
+        // merge-proposal signal; for a reviewer a human approval makes the
+        // agent's own review moot, so complete its pending review task (never
+        // spin up a fresh review). (My own approvals with an empty body carry no
+        // agent marker; resolveReviewOnHumanApproval skips author === me.)
         if (reviewState === "approved") {
+          const review = {
+            state: reviewState,
+            body,
+            authorLogin: author,
+            htmlUrl: r.html_url ?? null,
+          };
           if (isAssignee)
-            await proposeMergeForApprovedReview(repo, subject, {
-              state: reviewState,
-              body,
-              authorLogin: author,
-              htmlUrl: r.html_url ?? null,
-            });
+            await proposeMergeForApprovedReview(repo, subject, review);
+          else await resolveReviewOnHumanApproval(repo, subject, review, me);
           continue;
         }
         await handleItem(author, r.html_url ?? null, {

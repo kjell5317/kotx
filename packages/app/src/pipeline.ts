@@ -11,6 +11,7 @@ import {
   findActiveTask,
   findInReviewImplementTaskForPr,
   findNonTerminalTask,
+  findPendingReviewTaskForPr,
   findInReviewTasksTrackingAnyPr,
   findTasksTrackingPr,
   findTasksWaitingOnPr,
@@ -387,6 +388,39 @@ export async function proposeMergeForApprovedReview(
   return { status: "handled", action: `merge-proposed:${task.id}` };
 }
 
+/**
+ * A human approved a PR the agent is reviewing. The agent's own review is now
+ * moot, so silently complete its pending review task (`awaiting_approval` →
+ * `done`) without submitting or posting REVIEW.md. Approvals authored by the
+ * agent itself are skipped — the agent submits its own approving review via
+ * POST /api/tasks/:id/approve, which already marks the task done. A review still
+ * drafting/running is left alone (nothing sits in `awaiting_approval` yet).
+ */
+export async function resolveReviewOnHumanApproval(
+  repo: RepoConfig,
+  subject: NormalizedSubject,
+  review: PullRequestReviewInput,
+  me: string,
+): Promise<IngestResult> {
+  if (subject.type !== "pull_request")
+    return { status: "ignored", reason: "not-pr" };
+  if (review.state !== "approved")
+    return { status: "ignored", reason: "review-not-approved" };
+  if (review.authorLogin === me)
+    return { status: "ignored", reason: "own-approval" };
+
+  const task = await findPendingReviewTaskForPr(repo.full_name, subject.number);
+  if (!task) return { status: "ignored", reason: "no-pending-review" };
+
+  await setTaskState(task.id, "done", "PR approved by reviewer");
+  await clearNotification(taskNotifyTag(task.id));
+  logger.info(
+    { taskId: task.id, prNumber: subject.number, reviewer: review.authorLogin },
+    "review task completed by human PR approval",
+  );
+  return { status: "handled", action: `review-resolved:${task.id}` };
+}
+
 export async function markPrOpened(
   repo: RepoConfig,
   prNumber: number,
@@ -659,8 +693,16 @@ export async function ingest(n: Normalized): Promise<IngestResult> {
     n.event === "pull_request_review" &&
     n.pullRequestReview?.state === "approved"
   ) {
+    // A PR I authored (assignee): an approval proposes a merge. A PR I'm only
+    // reviewing: a human approval makes the agent's own review moot, so complete
+    // its pending review task instead of ignoring the event.
     if (!subject.assignees.includes(me))
-      return { status: "ignored", reason: "not-assigned-to-me" };
+      return resolveReviewOnHumanApproval(
+        repo,
+        subject,
+        n.pullRequestReview,
+        me,
+      );
     return proposeMergeForApprovedReview(repo, subject, n.pullRequestReview);
   }
 
