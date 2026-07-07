@@ -73,13 +73,26 @@ Your previous review was:
 
 Only things that are **worth the author's attention**:
 
-- Open with a one-line overall take (e.g. "Looks good to merge", "Needs changes
-  before merge", "Blocking issue below") — **not** a recap of what the PR does;
-  the author already knows.
+- Open with a one-line **merge verdict** that makes the blocking status
+  unambiguous. Use one of:
+  - **Blocking — do not merge**: there is at least one finding that must be
+    fixed before merge (correctness bug, security hole, data loss, broken/missing
+    tests, API/contract breakage, or similar).
+  - **Non-blocking — safe to merge**: findings exist but are minor; merging as-is
+    is fine, and the notes below are optional improvements.
+  - **Approve — no findings**: nothing worth changing.
+  Do **not** recap what the PR does; the author already knows.
 - Then list only **substantive** findings: correctness bugs, security problems,
   data loss, broken or missing tests, race conditions, API/contract breakage, or
-  design choices that will cause real problems. For each, reference the location
-  as `path/to/file.ts:42` and say what to change and why.
+  design choices that will cause real problems. **Prefix each finding with
+  `[blocking]` or `[non-blocking]`** so the author can tell what must be fixed
+  before merge from what can be deferred or skipped. For each, reference the
+  location as `path/to/file.ts:42` and say what to change and why.
+- Be honest about severity: don't inflate a minor nit into a blocker, and don't
+  soften a real correctness/security problem into "non-blocking". The verdict
+  must match the findings — if any finding is `[blocking]`, the verdict is
+  "Blocking"; if every finding is `[non-blocking]`, the verdict is
+  "Non-blocking — safe to merge".
 - If a previous substantive finding is still present, report it as a current
   finding and note that it remains unresolved. If it is fixed, do not list it as
   a finding.
