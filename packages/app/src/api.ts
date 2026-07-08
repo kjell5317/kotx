@@ -488,6 +488,7 @@ function normalizePull(pr: {
   state?: string;
   assignees?: Array<{ login?: string | null } | null> | null;
   requested_reviewers?: Array<{ login?: string | null } | null> | null;
+  user?: { login?: string | null } | null;
   title?: string | null;
   body?: string | null;
   head?: {
@@ -503,6 +504,7 @@ function normalizePull(pr: {
     state: pr.state === "closed" ? "closed" : "open",
     assignees: logins(pr.assignees),
     requestedReviewers: logins(pr.requested_reviewers),
+    author: pr.user?.login ?? undefined,
     title: pr.title ?? "",
     body: pr.body ?? "",
     headRef: pr.head?.ref ?? undefined,
@@ -676,10 +678,15 @@ export function registerApi(app: FastifyInstance): void {
 
     if (input.type === "review") {
       const result = await startReview(repo, subject, "api");
-      // Surface who the PR is assigned to so the caller knows who owns it.
-      return sendManualRunResult(reply, result, {
-        assignees: subject.assignees,
-      });
+      // Surface who owns the PR so the caller knows who to hand back to. PRs
+      // often carry no explicit GitHub assignee, so fall back to the PR author.
+      const owners =
+        subject.assignees.length > 0
+          ? subject.assignees
+          : subject.author
+            ? [subject.author]
+            : [];
+      return sendManualRunResult(reply, result, { assignees: owners });
     }
     const result = await maybeResolveConflict(repo, subject, "api");
     return sendManualRunResult(reply, result);

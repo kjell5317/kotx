@@ -85,8 +85,9 @@ requested action applies:
 
 - `implement` accepts an open issue or open PR and creates the normal draft task.
 - `review` accepts only an open PR and creates or refreshes a review task. The
-  response also includes an `assignees` array (the PR's assignee logins) so the
-  caller knows who owns the PR being reviewed.
+  response also includes an `assignees` array so the caller knows who owns the
+  PR being reviewed — the PR's assignee logins, or, when the PR has no assignee,
+  the PR author's login as a fallback.
 - `resolve` accepts only an open PR that is currently conflicting; mergeable PRs
   return `409`.
 

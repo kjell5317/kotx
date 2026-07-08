@@ -12,7 +12,9 @@ export interface NormalizedSubject {
   requestedReviewers: string[];
   title: string;
   body: string;
-  // PR-only:
+  // PR-only: the PR author's login. Used to surface who owns a reviewed PR when
+  // it has no explicit GitHub assignee.
+  author?: string;
   headRef?: string;
   headRepoFullName?: string;
   baseRef?: string;
@@ -64,6 +66,7 @@ function subjectFromPull(pr: any): NormalizedSubject {
     requestedReviewers: names(pr.requested_reviewers, "login"),
     title: pr.title ?? "",
     body: pr.body ?? "",
+    author: pr.user?.login ?? undefined,
     headRef: pr.head?.ref,
     headRepoFullName: pr.head?.repo?.full_name ?? undefined,
     baseRef: pr.base?.ref,
