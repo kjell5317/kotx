@@ -56,6 +56,12 @@ export function taskDto(t: TaskListItem) {
     prNumber: t.pr_number,
     trackedPrNumber: trackedPr,
     triggeredBy: t.triggered_by,
+    // Why this task was created / last refreshed (human-readable), and who owns
+    // its subject — the assignee logins, or the PR author when a PR has none.
+    // Most useful for review tasks, where the frontend shows the reviewed PR's
+    // owner. `assignees` is [] when no owner is known (or a legacy row).
+    triggerReason: t.trigger_reason,
+    assignees: t.subject_assignees ?? [],
     outcome: t.outcome,
     attempt: t.attempt,
     startedAt: t.started_at,

@@ -34,6 +34,7 @@ import {
 } from "@kotx/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { NormalizedSubject } from "./extract.js";
+import { subjectOwners, TRIGGER_REASON } from "./extract.js";
 import {
   maybeResolveConflict,
   startDraft,
@@ -657,7 +658,7 @@ export function registerApi(app: FastifyInstance): void {
     if (input.type === "implement") {
       return sendManualRunResult(
         reply,
-        await startDraft(repo, subject, "api", null),
+        await startDraft(repo, subject, "api", TRIGGER_REASON.manual, null),
       );
     }
 
@@ -677,16 +678,12 @@ export function registerApi(app: FastifyInstance): void {
     }
 
     if (input.type === "review") {
-      const result = await startReview(repo, subject, "api");
+      const result = await startReview(repo, subject, "api", TRIGGER_REASON.manual);
       // Surface who owns the PR so the caller knows who to hand back to. PRs
       // often carry no explicit GitHub assignee, so fall back to the PR author.
-      const owners =
-        subject.assignees.length > 0
-          ? subject.assignees
-          : subject.author
-            ? [subject.author]
-            : [];
-      return sendManualRunResult(reply, result, { assignees: owners });
+      return sendManualRunResult(reply, result, {
+        assignees: subjectOwners(subject),
+      });
     }
     const result = await maybeResolveConflict(repo, subject, "api");
     return sendManualRunResult(reply, result);

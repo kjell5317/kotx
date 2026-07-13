@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { cp } from "node:fs/promises";
 import { join } from "node:path";
 import { getRedis, loadDefaults, loadEnv, logger, redisKeys } from "@kotx/shared";
 import { run } from "./exec.js";
@@ -62,6 +63,64 @@ export async function ensureFreshAuth(): Promise<void> {
     const [bin, ...args] = cmd.split(" ");
     await run(bin!, args, { env: { ...process.env, CODEX_HOME: env.codexHome } });
     logger.info("refreshed codex auth on host");
+  } finally {
+    await redis.del(lockKey);
+  }
+}
+
+/**
+ * After a run, copy the run's (writable) CODEX_HOME `auth.json` back to the host
+ * if Codex rotated the token during the run.
+ *
+ * ChatGPT/OpenAI OAuth uses ROTATING refresh tokens: every refresh mints a new
+ * refresh token and invalidates the previous one. Because each run gets a private
+ * copy of `auth.json` (so concurrent runners don't share a writable auth dir), a
+ * token Codex refreshes mid-run is otherwise LOST when that copy is discarded —
+ * the host keeps the now-consumed refresh token, and the next run's attempt to
+ * reuse it fails with "refresh token was already used". Writing the newer token
+ * back keeps the host authoritative so the next run seeds from a live token.
+ *
+ * Best-effort and serialized under the same Redis lock as ensureFreshAuth, so a
+ * host pre-refresh and concurrent write-backs don't clobber each other. Only
+ * writes when the run's access-token expiry is strictly later than the host's
+ * (i.e. Codex actually refreshed); a run that never refreshed is a no-op.
+ *
+ * NOTE: this cannot revive a refresh token that is ALREADY dead — if the host
+ * token was consumed without being persisted (the pre-fix failure mode) or was
+ * rotated by logging into the same account elsewhere, runs keep failing until you
+ * re-authenticate on the host (`codex login` into $CODEX_HOME).
+ */
+export async function persistRefreshedAuth(
+  perRunCodexHome: string,
+): Promise<void> {
+  const env = loadEnv();
+  const runExp = tokenExpiryEpoch(perRunCodexHome);
+  if (runExp === null) return; // no readable token in the run copy — nothing to persist
+  const hostExp = tokenExpiryEpoch(env.codexHome);
+  if (hostExp !== null && runExp <= hostExp) return; // host already as fresh — Codex didn't refresh
+
+  const redis = getRedis();
+  const lockKey = redisKeys.codexAuthLock();
+  const got = await redis.set(lockKey, "1", "EX", 30, "NX");
+  if (got !== "OK") {
+    // A refresh/write-back is already in flight; it lands a token at least as
+    // fresh as ours, so drop this one rather than contend for the lock.
+    logger.debug({ runExp }, "codex auth write-back skipped: lock held");
+    return;
+  }
+  try {
+    // Re-check under the lock: another run may have persisted a newer token while
+    // we waited, in which case ours is now stale — don't overwrite it.
+    const hostExpNow = tokenExpiryEpoch(env.codexHome);
+    if (hostExpNow !== null && runExp <= hostExpNow) return;
+    await cp(
+      join(perRunCodexHome, "auth.json"),
+      join(env.codexHome, "auth.json"),
+    );
+    logger.info(
+      { runExp, hostExp: hostExpNow },
+      "persisted refreshed codex auth to host",
+    );
   } finally {
     await redis.del(lockKey);
   }

@@ -2,6 +2,7 @@ import { cp, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import Docker from "dockerode";
 import { loadDefaults, loadEnv, logger } from "@kotx/shared";
+import { persistRefreshedAuth } from "./codexAuth.js";
 
 let docker: Docker | undefined;
 function getDocker(): Docker {
@@ -213,6 +214,13 @@ export async function runCodexContainer(opts: {
     try {
       await created.start();
       const res = (await created.wait()) as { StatusCode: number };
+      // Codex may have rotated the OAuth token during the run (writing it to the
+      // per-run CODEX_HOME copy). Persist that rotation back to the host so the
+      // next run doesn't reuse the now-consumed refresh token ("refresh token
+      // already used"). Best-effort — never fail the run over the write-back.
+      await persistRefreshedAuth(perRunCodexHome).catch((err) =>
+        logger.warn({ err, name: opts.name }, "codex auth write-back failed"),
+      );
       return res.StatusCode;
     } finally {
       await created.remove({ force: true }).catch((err) => {

@@ -87,6 +87,14 @@ export interface Task {
   reviewed_head_sha: string | null;
   triggered_by: string;
   trigger_comment_url: string | null;
+  // Human-readable description of what triggered this task's creation or last
+  // refresh (e.g. "review requested", "new commits on PR"). Null for rows that
+  // predate the trigger_reason column.
+  trigger_reason: string | null;
+  // The subject's resolved owners: its GitHub assignee logins, or the PR author
+  // when a PR has none. Null for pre-existing rows; empty when none could be
+  // resolved. Surfaced so the frontend can show who owns a reviewed PR.
+  subject_assignees: string[] | null;
   created_at: Date;
   updated_at: Date;
 }

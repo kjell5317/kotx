@@ -220,6 +220,10 @@ export async function createTaskWithRun(input: {
   branchName: string | null;
   triggeredBy: string;
   triggerCommentUrl?: string | null;
+  // Human-readable reason this task was created (e.g. "review requested").
+  triggerReason: string;
+  // Resolved owners of the subject (assignee logins, or PR author fallback).
+  assignees: string[];
   dataDir: string;
 }): Promise<{ task: Task; run: TaskRun } | undefined> {
   const client = await getPool().connect();
@@ -229,8 +233,8 @@ export async function createTaskWithRun(input: {
     try {
       const t = await client.query<Task>(
         `INSERT INTO tasks
-           (repo_full_name, subject_type, subject_number, subject_title, kind, role, state, branch_name, triggered_by, trigger_comment_url)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+           (repo_full_name, subject_type, subject_number, subject_title, kind, role, state, branch_name, triggered_by, trigger_comment_url, trigger_reason, subject_assignees)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
          RETURNING *`,
         [
           input.repoFullName,
@@ -243,6 +247,8 @@ export async function createTaskWithRun(input: {
           input.branchName,
           input.triggeredBy,
           input.triggerCommentUrl ?? null,
+          input.triggerReason,
+          input.assignees,
         ],
       );
       task = t.rows[0]!;
@@ -351,14 +357,25 @@ export async function setTaskPr(id: number, prNumber: number): Promise<void> {
   ]);
 }
 
+/**
+ * Record the latest trigger on an existing task: who triggered it, the comment
+ * URL (if any), the human-readable reason, and the subject's resolved owners.
+ * Called when a repeat trigger folds into an existing non-terminal task so the
+ * API/webhook always reflect the most recent trigger.
+ */
 export async function setTaskTrigger(
   id: number,
   triggeredBy: string,
   triggerCommentUrl: string | null,
+  triggerReason: string,
+  assignees: string[],
 ): Promise<void> {
   await getPool().query(
-    `UPDATE tasks SET triggered_by = $2, trigger_comment_url = $3 WHERE id = $1`,
-    [id, triggeredBy, triggerCommentUrl],
+    `UPDATE tasks
+       SET triggered_by = $2, trigger_comment_url = $3,
+           trigger_reason = $4, subject_assignees = $5
+     WHERE id = $1`,
+    [id, triggeredBy, triggerCommentUrl, triggerReason, assignees],
   );
 }
 

@@ -18,6 +18,12 @@ import {
 import type { Octokit } from "@octokit/rest";
 import type { NormalizedSubject } from "./extract.js";
 import {
+  commentReason,
+  followUpReason,
+  newCommitsReason,
+  TRIGGER_REASON,
+} from "./extract.js";
+import {
   maybeResolveConflict,
   prMergeState,
   proposeMergeForApprovedReview,
@@ -210,8 +216,9 @@ async function pollIssues(
       requestedReviewers: [],
       title: it.title ?? "",
       body: it.body ?? "",
+      author: it.user?.login ?? undefined,
     };
-    await startDraft(repo, subject, me, null);
+    await startDraft(repo, subject, me, TRIGGER_REASON.issueAssigned, null);
   }
 }
 
@@ -238,6 +245,7 @@ async function pollPulls(
       requestedReviewers: logins(pr.requested_reviewers),
       title: pr.title ?? "",
       body: pr.body ?? "",
+      author: pr.user?.login ?? undefined,
       headRef: pr.head?.ref,
       headRepoFullName: pr.head?.repo?.full_name ?? undefined,
       baseRef: pr.base?.ref,
@@ -257,7 +265,10 @@ async function pollPulls(
         reviewTask?.reviewed_head_sha != null &&
         headSha !== "" &&
         headSha !== reviewTask.reviewed_head_sha;
-      if (!seen || advanced) await startReview(repo, subject, me);
+      // First time we see this PR → the review was requested; a later re-review
+      // is driven by new commits (the head SHA advanced).
+      const reason = seen ? newCommitsReason() : TRIGGER_REASON.reviewRequested;
+      if (!seen || advanced) await startReview(repo, subject, me, reason);
     } else if (subject.assignees.includes(me)) {
       // Resolve conflicts vs. draft an implementation are mutually exclusive, and
       // both want the PR's single active slot. Decide on *settled* mergeability so
@@ -270,7 +281,8 @@ async function pollPulls(
         // Don't re-draft a PR the agent itself opened (tracked via pr_number);
         // that assignment is the agent's own, not a request to implement.
         const tracked = await findTasksTrackingPr(repo.full_name, pr.number);
-        if (tracked.length === 0) await startDraft(repo, subject, me, null);
+        if (tracked.length === 0)
+          await startDraft(repo, subject, me, TRIGGER_REASON.prAssigned, null);
       }
       // "unknown": mergeability still computing — do nothing this tick.
     }
@@ -347,9 +359,10 @@ async function pollComments(
         requestedReviewers: [],
         title: it.title ?? "",
         body: it.body ?? "",
+        author: it.user?.login ?? undefined,
       };
       if (iReview) {
-        await startReview(repo, subject, author);
+        await startReview(repo, subject, author, commentReason(subject));
       } else {
         const followUpInput: DraftFollowUpInput = {
           body: c.body ?? "",
@@ -357,7 +370,14 @@ async function pollComments(
           htmlUrl: c.html_url ?? null,
           eventLabel: "comment",
         };
-        await startDraft(repo, subject, author, c.html_url ?? null, followUpInput);
+        await startDraft(
+          repo,
+          subject,
+          author,
+          commentReason(subject),
+          c.html_url ?? null,
+          followUpInput,
+        );
       }
     } catch (err) {
       logger.warn({ err, issueNumber }, "poll: failed to handle comment");
@@ -405,6 +425,7 @@ async function pollPrReviewActivity(
       requestedReviewers: logins(pr.requested_reviewers),
       title: pr.title ?? "",
       body: pr.body ?? "",
+      author: pr.user?.login ?? undefined,
       headRef: pr.head?.ref,
       headRepoFullName: pr.head?.repo?.full_name ?? undefined,
       baseRef: pr.base?.ref,
@@ -417,7 +438,15 @@ async function pollPrReviewActivity(
       htmlUrl: string | null,
       input: DraftFollowUpInput,
     ): Promise<void> => {
-      if (isAssignee) await startDraft(repo, subject, author, htmlUrl, input);
+      if (isAssignee)
+        await startDraft(
+          repo,
+          subject,
+          author,
+          followUpReason(subject, input.eventLabel),
+          htmlUrl,
+          input,
+        );
       else reviewerActivity = true;
     };
 
@@ -489,7 +518,8 @@ async function pollPrReviewActivity(
         });
       }
 
-      if (reviewerActivity) await startReview(repo, subject, me);
+      if (reviewerActivity)
+        await startReview(repo, subject, me, TRIGGER_REASON.reviewSubmitted);
     } catch (err) {
       logger.warn({ err, prNumber: pr.number }, "poll: failed to handle PR review activity");
     }

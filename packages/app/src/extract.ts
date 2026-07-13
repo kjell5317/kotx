@@ -12,8 +12,8 @@ export interface NormalizedSubject {
   requestedReviewers: string[];
   title: string;
   body: string;
-  // PR-only: the PR author's login. Used to surface who owns a reviewed PR when
-  // it has no explicit GitHub assignee.
+  // The subject's author login (PR author, or issue opener). Used as the
+  // fallback owner when a PR has no explicit GitHub assignee (see subjectOwners).
   author?: string;
   headRef?: string;
   headRepoFullName?: string;
@@ -37,6 +37,59 @@ export interface Normalized {
   pushRef?: string;
 }
 
+/**
+ * The subject's "owners": its explicit GitHub assignees, or — when a PR has no
+ * assignee — the PR author as a fallback. Empty when neither is known. This is
+ * what the API/webhook surfaces as `assignees` so the frontend can show who owns
+ * a reviewed PR (a PR often has no assignee, only an author).
+ */
+export function subjectOwners(subject: NormalizedSubject): string[] {
+  if (subject.assignees.length > 0) return subject.assignees;
+  return subject.author ? [subject.author] : [];
+}
+
+/**
+ * Human-readable trigger reasons, stored on the task and surfaced in the
+ * API/webhook. Free-form text by contract, but always drawn from this set so the
+ * frontend sees stable values. `comment`/`newCommits` are subject-aware (see the
+ * helpers below) — "PR" vs "issue" — so a consumer can read them verbatim.
+ */
+export const TRIGGER_REASON = {
+  issueAssigned: "assigned to issue",
+  prAssigned: "assigned to PR",
+  reviewRequested: "review requested",
+  reviewSubmitted: "PR review submitted",
+  prApproved: "PR approved",
+  manual: "manual run",
+} as const;
+
+/** "new commits on PR" — the PR was opened/reopened or received a new push. */
+export function newCommitsReason(): string {
+  return "new commits on PR";
+}
+
+/** "new comment on {issue|PR}" for the subject the comment landed on. */
+export function commentReason(subject: NormalizedSubject): string {
+  return subject.type === "pull_request"
+    ? "new comment on PR"
+    : "new comment on issue";
+}
+
+/**
+ * The reason for a follow-up carried by a comment/review event: a submitted PR
+ * review (review body or inline review comment) vs. a plain comment. Derived
+ * from the DraftFollowUpInput's eventLabel ("comment" | "review" | "inline
+ * review comment").
+ */
+export function followUpReason(
+  subject: NormalizedSubject,
+  eventLabel: string | undefined,
+): string {
+  return eventLabel?.includes("review")
+    ? TRIGGER_REASON.reviewSubmitted
+    : commentReason(subject);
+}
+
 // The webhook payloads are loosely typed; we read only the fields we need.
 /* eslint-disable @typescript-eslint/no-explicit-any */
 function names(arr: any[] | undefined, key: string): string[] {
@@ -54,6 +107,8 @@ export function subjectFromIssue(issue: any): NormalizedSubject {
     requestedReviewers: [],
     title: issue.title ?? "",
     body: issue.body ?? "",
+    // `issue.user` is the opener — the PR author for a PR-flavored issue payload.
+    author: issue.user?.login ?? undefined,
   };
 }
 

@@ -87,7 +87,10 @@ requested action applies:
 - `review` accepts only an open PR and creates or refreshes a review task. The
   response also includes an `assignees` array so the caller knows who owns the
   PR being reviewed — the PR's assignee logins, or, when the PR has no assignee,
-  the PR author's login as a fallback.
+  the PR author's login as a fallback. This is the same value the task object
+  carries as `assignees` (see [The task object](#the-task-object)), so the
+  webhook/`GET /api/tasks` payload alone is enough — you don't need this response
+  to learn the owner.
 - `resolve` accepts only an open PR that is currently conflicting; mergeable PRs
   return `409`.
 
@@ -197,7 +200,9 @@ state change POSTed to that URL:
   "branch": "31-add-metadata-index",
   "prNumber": null,                // set after a PR is opened from the pushed branch
   "trackedPrNumber": null,         // PR this task is waiting on; for PR-subject tasks this is subjectNumber
-  "triggeredBy": "octocat",
+  "triggeredBy": "octocat",        // github login that triggered the latest event
+  "triggerReason": "review requested", // human-readable why the task was (re)created; see below
+  "assignees": ["octocat"],        // who owns the subject: PR/issue assignees, or the PR author if none
   "outcome": null,                 // last run outcome, once finished
   "attempt": 1,
   "startedAt": null,
@@ -224,6 +229,42 @@ confirmation endpoint). When
 `canComment` is true, `POST …/comment` posts the same `REVIEW.md` as a plain PR
 comment instead of approving the PR; it is rejected if the saved review is empty
 or whitespace-only.
+
+### Who owns it and why it appeared: `assignees` and `triggerReason`
+
+`assignees` and `triggerReason` describe **who owns the work** and **why the task
+appeared**. Both are captured when the task is created and **refreshed on every
+later trigger** (a re-review on new commits, a follow-up comment, a manual run),
+so the webhook payload and `GET /api/tasks` always carry the current values —
+you don't need a live GitHub call to render them.
+
+- **`assignees`** (`string[]`) — the resolved owners of the task's subject: the
+  GitHub issue/PR **assignee logins**, or, when a PR has **no** assignee, the
+  **PR author's login** as a fallback. It is `[]` when no owner could be resolved
+  (or for rows created before this field existed). This is the same value
+  `POST /api/runs` returns for a `review`. It is most useful for `kind = "review"`
+  tasks: it tells you who owns the PR you reviewed and who to hand it back to.
+  Do not confuse it with `triggeredBy` (the login of whoever fired the latest
+  event — often a bot or a commenter, not the owner) or with `role` (my own
+  relationship to the subject: `assignee` vs `reviewer`).
+
+- **`triggerReason`** (`string | null`) — a short, human-readable description of
+  the GitHub (or manual) event that created or last refreshed the task. `null`
+  only for rows created before this field existed. Read it verbatim for display;
+  it is drawn from this fixed set:
+
+  | `triggerReason` | kind(s) | when |
+  | --- | --- | --- |
+  | `assigned to issue` | implement | an issue was assigned to me |
+  | `assigned to PR` | implement | an unassigned-work PR assigned to me was drafted |
+  | `review requested` | review | my review was requested on a PR |
+  | `new commits on PR` | review | a reviewed PR was opened/reopened or got a new push |
+  | `new comment on PR` | review, implement | a comment landed on a PR I own/review |
+  | `new comment on issue` | implement | a comment landed on an issue I'm assigned |
+  | `PR review submitted` | review, implement | a PR review (body or inline comment) was submitted |
+  | `PR approved` | implement | an approving PR review proposed a merge |
+  | `PR conflicts with base branch` | resolve_conflict | a tracked PR became unmergeable |
+  | `manual run` | any | triggered via `POST /api/runs` |
 
 ### Status meanings
 

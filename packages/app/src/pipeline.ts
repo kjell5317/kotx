@@ -11,7 +11,6 @@ import {
   findActiveTask,
   findInReviewImplementTaskForPr,
   findNonTerminalTask,
-  findPendingReviewTaskForPr,
   findInReviewTasksTrackingAnyPr,
   findTasksTrackingPr,
   findTasksWaitingOnPr,
@@ -41,6 +40,13 @@ import {
 } from "@kotx/shared";
 import type { Octokit } from "@octokit/rest";
 import type { Normalized, NormalizedSubject } from "./extract.js";
+import {
+  commentReason,
+  followUpReason,
+  newCommitsReason,
+  subjectOwners,
+  TRIGGER_REASON,
+} from "./extract.js";
 
 export type IngestResult =
   | { status: "ignored"; reason: string }
@@ -75,6 +81,7 @@ interface NewTaskInput {
   phase: JobPhase;
   initialState: "drafting" | "queued";
   triggeredBy: string;
+  triggerReason: string;
   triggerCommentUrl?: string | null;
   followUpInput?: DraftFollowUpInput;
 }
@@ -91,6 +98,8 @@ async function createAndEnqueue(input: NewTaskInput): Promise<IngestResult> {
     branchName: null, // the worker derives it (needs the issue/PR title)
     triggeredBy: input.triggeredBy,
     triggerCommentUrl: input.triggerCommentUrl ?? null,
+    triggerReason: input.triggerReason,
+    assignees: subjectOwners(input.subject),
     dataDir: loadEnv().agentDataDir,
   });
   if (!created) return { status: "ignored", reason: "already-active-race" };
@@ -117,6 +126,7 @@ export async function startDraft(
   repo: RepoConfig,
   subject: NormalizedSubject,
   triggeredBy: string,
+  triggerReason: string,
   triggerCommentUrl: string | null,
   followUpInput?: DraftFollowUpInput,
 ): Promise<IngestResult> {
@@ -151,7 +161,13 @@ export async function startDraft(
       (existing.state === "awaiting_approval" && existing.pr_number === null);
     if (reDraftable) {
       const run = await addRun(existing.id, loadEnv().agentDataDir);
-      await setTaskTrigger(existing.id, triggeredBy, triggerCommentUrl);
+      await setTaskTrigger(
+        existing.id,
+        triggeredBy,
+        triggerCommentUrl,
+        triggerReason,
+        subjectOwners(subject),
+      );
       await enqueueRun(existing, run.id, "implement", "draft", followUpInput);
       // No webhook here: the state is still unchanged, so emitting would send a
       // redundant no-op event. The worker fires the real transition (→ drafting)
@@ -162,7 +178,13 @@ export async function startDraft(
       );
       return { status: "enqueued", taskId: existing.id };
     }
-    await setTaskTrigger(existing.id, triggeredBy, triggerCommentUrl);
+    await setTaskTrigger(
+      existing.id,
+      triggeredBy,
+      triggerCommentUrl,
+      triggerReason,
+      subjectOwners(subject),
+    );
     emitTaskStateChanged(existing.id, existing.state);
     logger.info(
       { taskId: existing.id, state: existing.state, triggeredBy },
@@ -183,6 +205,7 @@ export async function startDraft(
     phase: "draft",
     initialState: "drafting",
     triggeredBy,
+    triggerReason,
     triggerCommentUrl,
     followUpInput,
   });
@@ -193,6 +216,7 @@ export async function startReview(
   repo: RepoConfig,
   subject: NormalizedSubject,
   triggeredBy: string,
+  triggerReason: string,
 ): Promise<IngestResult> {
   if (subject.state !== "open")
     return { status: "ignored", reason: "subject-closed" };
@@ -207,9 +231,18 @@ export async function startReview(
   );
   if (existing) {
     // Re-review on new commits: replace a stale review (queued / ready) with a
-    // fresh run. Don't interrupt a review that's actively running.
+    // fresh run. Don't interrupt a review that's actively running. Record the
+    // latest trigger so the API/webhook reflect why the re-review fired and who
+    // still owns the PR.
     if (existing.state !== "running") {
       const run = await addRun(existing.id, loadEnv().agentDataDir);
+      await setTaskTrigger(
+        existing.id,
+        triggeredBy,
+        null,
+        triggerReason,
+        subjectOwners(subject),
+      );
       await enqueueRun(existing, run.id, "review", "execute");
       emitTaskStateChanged(existing.id, existing.state);
       logger.info({ taskId: existing.id }, "review refreshed");
@@ -230,6 +263,7 @@ export async function startReview(
     phase: "execute",
     initialState: "queued",
     triggeredBy,
+    triggerReason,
   });
 }
 
@@ -273,6 +307,7 @@ export async function maybeResolveConflict(
     phase: "execute",
     initialState: "queued",
     triggeredBy,
+    triggerReason: "PR conflicts with base branch",
   });
 }
 
@@ -368,7 +403,13 @@ export async function proposeMergeForApprovedReview(
   );
 
   try {
-    await setTaskTrigger(task.id, review.authorLogin, review.htmlUrl);
+    await setTaskTrigger(
+      task.id,
+      review.authorLogin,
+      review.htmlUrl,
+      TRIGGER_REASON.prApproved,
+      subjectOwners(subject),
+    );
     await setTaskState(task.id, "awaiting_approval");
   } catch (err) {
     if (isUniqueViolation(err)) {
@@ -390,11 +431,13 @@ export async function proposeMergeForApprovedReview(
 
 /**
  * A human approved a PR the agent is reviewing. The agent's own review is now
- * moot, so silently complete its pending review task (`awaiting_approval` →
- * `done`) without submitting or posting REVIEW.md. Approvals authored by the
- * agent itself are skipped — the agent submits its own approving review via
- * POST /api/tasks/:id/approve, which already marks the task done. A review still
- * drafting/running is left alone (nothing sits in `awaiting_approval` yet).
+ * moot, so complete its review task → `done` without submitting or posting
+ * REVIEW.md. This applies in ANY non-terminal state: a review still queued or
+ * running is stopped (cancel flag) — the worker leaves the `done` we set intact
+ * rather than overwriting it with `cancelled` (see setRunTerminalState) — and one
+ * already `awaiting_approval` is completed directly. Approvals authored by the
+ * agent itself are skipped: the agent submits its own approving review via
+ * POST /api/tasks/:id/approve, which already marks the task done.
  */
 export async function resolveReviewOnHumanApproval(
   repo: RepoConfig,
@@ -409,13 +452,19 @@ export async function resolveReviewOnHumanApproval(
   if (review.authorLogin === me)
     return { status: "ignored", reason: "own-approval" };
 
-  const task = await findPendingReviewTaskForPr(repo.full_name, subject.number);
-  if (!task) return { status: "ignored", reason: "no-pending-review" };
+  const task = await findNonTerminalTask(repo.full_name, subject.number, "review");
+  if (!task) return { status: "ignored", reason: "no-review-task" };
 
+  await setCancelFlag(task.id);
   await setTaskState(task.id, "done", "PR approved by reviewer");
   await clearNotification(taskNotifyTag(task.id));
   logger.info(
-    { taskId: task.id, prNumber: subject.number, reviewer: review.authorLogin },
+    {
+      taskId: task.id,
+      prNumber: subject.number,
+      reviewer: review.authorLogin,
+      fromState: task.state,
+    },
     "review task completed by human PR approval",
   );
   return { status: "handled", action: `review-resolved:${task.id}` };
@@ -653,7 +702,7 @@ export async function ingest(n: Normalized): Promise<IngestResult> {
   // Branch 3: review explicitly requested.
   if (n.event === "pull_request" && n.action === "review_requested") {
     if (n.targetLogin !== me) return { status: "ignored", reason: "reviewer-not-me" };
-    return startReview(repo, subject, n.senderLogin);
+    return startReview(repo, subject, n.senderLogin, TRIGGER_REASON.reviewRequested);
   }
 
   // New commits / (re)open: re-review the PR if my review is requested OR I have
@@ -668,7 +717,7 @@ export async function ingest(n: Normalized): Promise<IngestResult> {
       subject.requestedReviewers.includes(me) ||
       (await hasReviewTask(repo.full_name, subject.number))
     )
-      return startReview(repo, subject, n.senderLogin);
+      return startReview(repo, subject, n.senderLogin, newCommitsReason());
     if (subject.assignees.includes(me))
       return maybeResolveConflict(repo, subject, n.senderLogin);
     return { status: "ignored", reason: "pr-not-mine" };
@@ -678,7 +727,7 @@ export async function ingest(n: Normalized): Promise<IngestResult> {
   if (n.event === "issues" && n.action === "assigned") {
     if (n.targetLogin !== me && !subject.assignees.includes(me))
       return { status: "ignored", reason: "assignee-not-me" };
-    return startDraft(repo, subject, n.senderLogin, null);
+    return startDraft(repo, subject, n.senderLogin, TRIGGER_REASON.issueAssigned, null);
   }
 
   // A PR assigned to me is NOT a Branch 1 trigger — assignee work on a PR is
@@ -718,13 +767,16 @@ export async function ingest(n: Normalized): Promise<IngestResult> {
       subject.type === "pull_request" &&
       (subject.requestedReviewers.includes(me) ||
         (await hasReviewTask(repo.full_name, subject.number)));
-    if (iReview) return startReview(repo, subject, n.comment.authorLogin);
+    const reason = followUpReason(subject, n.comment.eventLabel);
+    if (iReview)
+      return startReview(repo, subject, n.comment.authorLogin, reason);
     if (!subject.assignees.includes(me))
       return { status: "ignored", reason: "not-assigned-to-me" };
     return startDraft(
       repo,
       subject,
       n.comment.authorLogin,
+      reason,
       n.comment.htmlUrl || null,
       n.comment,
     );

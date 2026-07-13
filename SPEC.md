@@ -279,6 +279,14 @@ github_deliveries   webhook + poll follow-up idempotency (delivery/comment/revie
 drives which list the frontend shows it in. `hitl_requests`/`hitl_state` were
 dropped earlier (`1700000001000_drop_hitl.sql`).
 
+`tasks.trigger_reason` (human-readable, e.g. "review requested", "new commits on
+PR") and `tasks.subject_assignees` (`TEXT[]`: the subject's assignee logins, or
+the PR author when a PR has none) are set at task creation and refreshed on every
+later trigger (`setTaskTrigger`). Both are surfaced in the task DTO as
+`triggerReason` / `assignees` so the frontend can show *why* a task appeared and
+*who* owns the reviewed PR without a live GitHub fetch
+(`1700000008000_trigger_reason_assignees.sql`; both NULL for older rows).
+
 Task states (`1700000003000_workflow_v3.sql` added `drafting`, `draft`,
 `awaiting_external`; `awaiting_approval` was a pre-existing inert value, now
 reused):

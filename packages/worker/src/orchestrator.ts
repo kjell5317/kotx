@@ -170,12 +170,26 @@ function failureState(outcome: RunOutcome): TaskState {
  * is always initiated elsewhere (PR/issue close, discard, preemption) and that
  * caller owns the webhook decision — the worker only stops the run. Other
  * terminal states (failed / timed_out) emit normally.
+ *
+ * If the task was already terminalized externally while this run was in flight
+ * (e.g. the PR under review was approved → `done`, the PR merged → `done`, or the
+ * task was discarded → `cancelled`), that outcome and its webhook are owned by
+ * the terminalizer — don't clobber it with the run's own terminal state. The run
+ * just stops.
  */
 async function setRunTerminalState(
   taskId: number,
   state: TaskState,
   reason: string | null = null,
 ): Promise<void> {
+  const current = await getTask(taskId);
+  if (current && TERMINAL_STATES.has(current.state)) {
+    logger.info(
+      { taskId, runTerminalState: state, taskState: current.state },
+      "task already terminal; leaving external outcome intact",
+    );
+    return;
+  }
   await setTaskState(taskId, state, reason, state !== "cancelled");
 }
 
