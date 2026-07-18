@@ -12,7 +12,9 @@ on:
 env:
   REGISTRY: ghcr.io
   # Pin the Codex CLI baked into the runner image to match your host CLI.
-  CODEX_VERSION: "0.142.4"
+  # 0.144.5+ is required for the gpt-5.6-sol model (older CLIs are rejected by
+  # the backend with "requires a newer version of Codex").
+  CODEX_VERSION: "0.144.5"
 
 jobs:
   build:
