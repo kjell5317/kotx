@@ -1,7 +1,7 @@
 # kotx API
 
 A small JSON API for an external frontend to view tasks and drive the three
-workflows (see [SPEC.md](SPEC.md) §0). Served by the `app` service.
+workflows. Served by the `app` service.
 
 ## Connecting
 
@@ -111,7 +111,7 @@ optional.
 ```bash
 curl -X POST -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  --data '{"repo":"Social Ai","title":"Add import progress","body":"Show progress while CSV imports run."}' \
+  --data '{"repo":"My Repo","title":"Add import progress","body":"Show progress while CSV imports run."}' \
   "https://agent.example.com/api/runs"
 ```
 
@@ -120,9 +120,9 @@ Successful issue creation returns:
 ```json
 {
   "status": "created",
-  "repo": "TUM-Social-AI/AflaConnect",
+  "repo": "owner/name",
   "issueNumber": 42,
-  "issueUrl": "https://github.com/TUM-Social-AI/AflaConnect/issues/42",
+  "issueUrl": "https://github.com/owner/name/issues/42",
   "assignee": "your-login"
 }
 ```

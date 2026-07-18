@@ -6,8 +6,6 @@ you, runs Codex in isolated Docker containers on your own Docker host, and acts
 Bearer-protected JSON API for an external frontend to drive. It never opens PRs
 or merges without human confirmation, and never deploys.
 
-See [SPEC.md](SPEC.md) for the full design and the decisions behind it.
-
 ## The three workflows
 
 1. **Task** — an issue is assigned to you, or someone comments / reviews on an
@@ -70,9 +68,7 @@ The document endpoints (`…/task`, `…/review`, `…/pr`) stay readable after 
 task is terminal, so an external frontend can index them for search. With
 `WEBHOOK_URL`/`WEBHOOK_SECRET` set, every task state change is also pushed as an
 HMAC-signed `task.state_changed` webhook carrying the full task object — see
-[API.md](API.md). If you are replacing the former non-failure Home Assistant
-mobile prompts in another task UI, see
-[HOME_ASSISTANT_NOTIFICATION_HANDOFF.md](HOME_ASSISTANT_NOTIFICATION_HANDOFF.md).
+[API.md](API.md).
 
 ## Setup
 

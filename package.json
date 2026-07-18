@@ -2,7 +2,7 @@
   "name": "kotx",
   "version": "0.1.0",
   "private": true,
-  "description": "Personal concurrent Codex coding agent (see SPEC.md)",
+  "description": "Personal concurrent Codex coding agent",
   "type": "module",
   "engines": {
     "node": ">=20"

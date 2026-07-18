@@ -375,20 +375,13 @@ function parseJsonObjectBody(body: unknown): Record<string, unknown> | string {
   return obj as Record<string, unknown>;
 }
 
-// Pre-config aliases, kept as a fallback for live repos.yml files that predate
-// the per-repo `aliases` field. Config aliases take precedence.
-const LEGACY_REPO_ALIASES = new Map<string, string>([
-  ["social ai", "TUM-Social-AI/AflaConnect"],
-  ["csee", "askLio/CSEE-strategic-negotiation-agent"],
-]);
-
 function aliasKeyOf(alias: string): string {
   return alias.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-/** Normalized alias → full_name, from repos.yml plus the legacy built-ins. */
+/** Normalized alias → full_name, from the per-repo `aliases` in repos.yml. */
 function repoAliasIndex(): Map<string, string> {
-  const index = new Map(LEGACY_REPO_ALIASES);
+  const index = new Map<string, string>();
   for (const repo of loadRepos().values()) {
     for (const alias of repo.aliases) {
       index.set(aliasKeyOf(alias), repo.full_name);
@@ -397,15 +390,10 @@ function repoAliasIndex(): Map<string, string> {
   return index;
 }
 
-/** The aliases that resolve to a repo (configured + applicable legacy ones),
- *  as served by GET /api/repos — the same set POST /api/runs accepts. */
+/** The aliases that resolve to a repo, as served by GET /api/repos — the same
+ *  set POST /api/runs accepts. */
 function repoAliases(fullName: string): string[] {
-  const aliases = [...(loadRepos().get(fullName)?.aliases ?? [])];
-  const seen = new Set(aliases.map(aliasKeyOf));
-  for (const [key, target] of LEGACY_REPO_ALIASES) {
-    if (target === fullName && !seen.has(key)) aliases.push(key);
-  }
-  return aliases;
+  return [...(loadRepos().get(fullName)?.aliases ?? [])];
 }
 
 function normalizeManualRunRepoInput(requested: string): string {
