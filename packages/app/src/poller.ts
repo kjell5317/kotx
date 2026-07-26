@@ -3,7 +3,7 @@ import {
   getLatestReviewTask,
   getOctokit,
   hasAnyTask,
-  hasReviewTask,
+  hasOpenReviewTask,
   isAgentComment,
   findNonTerminalIssueTasksWithoutPr,
   findTasksTrackingAnyPr,
@@ -346,10 +346,12 @@ async function pollComments(
       const it = issue.data;
       if (it.state !== "open") continue;
       const assignees = logins(it.assignees);
-      // A comment on a PR I'm reviewing → re-review; otherwise a comment on a
-      // subject I'm assigned to → Branch 1 follow-up.
+      // A comment on a PR whose review is still in flight → re-review; otherwise
+      // a comment on a subject I'm assigned to → Branch 1 follow-up. A PR whose
+      // review already finished is NOT re-reviewed on comments — only new commits
+      // (pollPulls' head-SHA check) or a fresh review request reopen it.
       const iReview =
-        !!it.pull_request && (await hasReviewTask(repo.full_name, it.number));
+        !!it.pull_request && (await hasOpenReviewTask(repo.full_name, it.number));
       if (!iReview && !assignees.includes(me)) continue;
       const subject: NormalizedSubject = {
         type: it.pull_request ? "pull_request" : "issue",
@@ -414,8 +416,13 @@ async function pollPrReviewActivity(
     const assignees = logins(pr.assignees);
     const isAssignee = assignees.includes(me);
     // A PR I'm reviewing → new review activity re-reviews (Branch 3); a PR I'm
-    // assigned to → each new review/comment is a Branch 1 follow-up.
-    const iReview = await hasReviewTask(repo.full_name, pr.number);
+    // assigned to → each new review/comment is a Branch 1 follow-up. "Reviewing"
+    // means my review is currently requested or still in flight — a completed
+    // review is not restarted by comment/review chatter (new commits or a
+    // re-request reopen it).
+    const iReview =
+      logins(pr.requested_reviewers).includes(me) ||
+      (await hasOpenReviewTask(repo.full_name, pr.number));
     if (!isAssignee && !iReview) continue;
     const subject: NormalizedSubject = {
       type: "pull_request",

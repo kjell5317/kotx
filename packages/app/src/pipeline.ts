@@ -16,6 +16,7 @@ import {
   findTasksWaitingOnPr,
   findOpenPrTask,
   getEnabledRepo,
+  hasOpenReviewTask,
   hasReviewTask,
   getOctokit,
   isAgentComment,
@@ -762,11 +763,15 @@ export async function ingest(n: Normalized): Promise<IngestResult> {
     if (isAgentComment(n.comment.body))
       return { status: "ignored", reason: "agent-comment" };
     // A comment/review on a PR I'm reviewing → re-review (Branch 3); a comment on
-    // a subject I'm assigned to → Branch 1 follow-up.
+    // a subject I'm assigned to → Branch 1 follow-up. "Reviewing" means my review
+    // is currently requested OR still in flight (non-terminal task) — a PR whose
+    // review finished is NOT re-reviewed on mere comments (that would let any
+    // commenter restart it forever); it re-reviews only on new commits
+    // (synchronize, above) or an explicit re-request.
     const iReview =
       subject.type === "pull_request" &&
       (subject.requestedReviewers.includes(me) ||
-        (await hasReviewTask(repo.full_name, subject.number)));
+        (await hasOpenReviewTask(repo.full_name, subject.number)));
     const reason = followUpReason(subject, n.comment.eventLabel);
     if (iReview)
       return startReview(repo, subject, n.comment.authorLogin, reason);

@@ -450,6 +450,27 @@ export async function hasReviewTask(
   return (res.rowCount ?? 0) > 0;
 }
 
+/** Whether a review of this PR is still in flight (non-terminal review task).
+ *  Comment activity keys re-reviews on THIS, not hasReviewTask: a finished
+ *  review must not make every later comment spawn a fresh run — only new
+ *  commits or an explicit re-request reopen a completed review. */
+export async function hasOpenReviewTask(
+  repoFullName: string,
+  prNumber: number,
+): Promise<boolean> {
+  const res = await getPool().query(
+    `SELECT 1 FROM tasks
+     WHERE repo_full_name = $1
+       AND kind = 'review'
+       AND subject_type = 'pull_request'
+       AND subject_number = $2
+       AND state::text NOT IN ${TERMINAL_STATE_SQL}
+     LIMIT 1`,
+    [repoFullName, prNumber],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
 /** The most recent review task for a PR (with the SHA it last reviewed), if any. */
 export async function getLatestReviewTask(
   repoFullName: string,
