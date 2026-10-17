@@ -8,7 +8,7 @@
     "@kotx/shared": "0.1.0",
     "bullmq": "^5.34.0",
     "dockerode": "^4.0.0",
-    "handlebars": "^4.7.8"
+    "handlebars": "^4.7.10"
   },
   "devDependencies": {
     "@types/dockerode": "^3.3.0"
